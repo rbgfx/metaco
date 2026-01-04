@@ -1,0 +1,29 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+jobs:
+  test:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby:
+          - "3.1"
+          - "3.2"
+          - "3.3"
+          - "3.4"
+          - "ruby"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+      - name: Compile extension
+        run: bundle exec rake compile
+      - name: Run tests
+        run: bundle exec rake test

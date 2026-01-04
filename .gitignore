@@ -1,0 +1,36 @@
+# C extension build artifacts
+*.o
+*.so
+*.bundle
+*.dll
+*.dSYM/
+Makefile
+mkmf.log
+
+# Gem
+*.gem
+/pkg/
+
+# Bundler
+/.bundle/
+/vendor/bundle
+
+# rake-compiler
+/tmp/
+
+# IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Coverage
+/coverage/
+
+# RSpec
+.rspec_status
+
+# Byebug
+.byebug_history
