@@ -396,6 +396,23 @@ class TestMetaco < Test::Unit::TestCase
       end
     end
 
+    test "failed recompilation preserves the working shader" do
+      omit unless Metaco.metal_compute_available?(@handle)
+      Metaco.compile_compute_shader(@handle, VALID_SHADER)
+      [INVALID_SHADER, VALID_SHADER.sub("compute_shader", "different_name")].each do |source|
+        assert_raise(RuntimeError) { Metaco.compile_compute_shader(@handle, source) }
+        assert_true Metaco.has_compute_shader?(@handle)
+        assert_nil Metaco.dispatch_compute(@handle, "")
+      end
+    end
+
+    test "uniform buffers accept up to 256 bytes and reject truncation" do
+      omit unless Metaco.metal_compute_available?(@handle)
+      Metaco.compile_compute_shader(@handle, VALID_SHADER)
+      [0, 4, 256].each { |length| assert_nil Metaco.dispatch_compute(@handle, "\0" * length) }
+      assert_raise(ArgumentError) { Metaco.dispatch_compute(@handle, "\0" * 257) }
+    end
+
     test "dispatch_compute with uniforms" do
       omit unless Metaco.metal_compute_available?(@handle)
       Metaco.compile_compute_shader(@handle, VALID_SHADER)

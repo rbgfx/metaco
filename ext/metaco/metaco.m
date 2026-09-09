@@ -6,56 +6,33 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <ruby.h>
+#import <ruby/thread.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
+
+static void native_error(NSError **error, NSString *message) {
+    if (error) *error = [NSError errorWithDomain:@"Metaco" code:1
+                                      userInfo:@{NSLocalizedDescriptionKey: message}];
+}
 
 @interface MetacoMetalView : NSView
 @property (nonatomic, strong) CAMetalLayer *metalLayer;
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property (nonatomic, strong) id<MTLTexture> texture;
+@property (nonatomic, strong) id<MTLRenderPipelineState> renderPipeline;
 @property (nonatomic, assign) int texWidth;
 @property (nonatomic, assign) int texHeight;
-// Compute shader support
 @property (nonatomic, strong) id<MTLComputePipelineState> computePipeline;
 @property (nonatomic, strong) id<MTLBuffer> uniformBuffer;
 @property (nonatomic, strong) id<MTLTexture> outputTexture;
-@property (nonatomic, assign) BOOL hasComputeShader;
+@property (nonatomic, readonly) BOOL hasComputeShader;
 @end
 
 @implementation MetacoMetalView
 
-- (void)cleanup {
-    // Only cleanup if we have resources
-    if (!self.device) return;
-
-    // Wait for GPU to finish before releasing resources
-    if (self.commandQueue) {
-        @try {
-            id<MTLCommandBuffer> syncBuffer = [self.commandQueue commandBuffer];
-            if (syncBuffer) {
-                [syncBuffer commit];
-                [syncBuffer waitUntilCompleted];
-            }
-        } @catch (NSException *e) {
-            // Ignore exceptions during cleanup
-        }
-    }
-
-    // Clear all Metal resources
-    self.computePipeline = nil;
-    self.uniformBuffer = nil;
-    self.outputTexture = nil;
-    self.texture = nil;
-    self.commandQueue = nil;
-    self.metalLayer = nil;
-    self.device = nil;
-    self.hasComputeShader = NO;
-}
-
-// dealloc is handled automatically by ARC - no manual cleanup needed
-// cocoa_window_destroy handles synchronization with GPU before release
+- (BOOL)hasComputeShader { return self.computePipeline != nil; }
 
 - (instancetype)initWithFrame:(NSRect)frame device:(id<MTLDevice>)device width:(int)w height:(int)h {
     self = [super initWithFrame:frame];
@@ -63,158 +40,142 @@
         self.device = device;
         self.texWidth = w;
         self.texHeight = h;
+        self.commandQueue = [device newCommandQueue];
+        if (!self.commandQueue) return nil;
+
+        // A render pass preserves RGBA channel meaning when writing a BGRA drawable.
+        NSString *source = @"#include <metal_stdlib>\n"
+            "using namespace metal;\n"
+            "vertex float4 metaco_vertex(uint i [[vertex_id]]) {\n"
+            "  const float2 p[] = {float2(-1,-1), float2(3,-1), float2(-1,3)};\n"
+            "  return float4(p[i], 0, 1);\n"
+            "}\n"
+            "fragment float4 metaco_fragment(float4 p [[position]],\n"
+            "  texture2d<float> input [[texture(0)]]) { return input.read(uint2(p.xy)); }\n";
+        id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:nil];
+        if (!library) return nil;
+        MTLRenderPipelineDescriptor *pipeline = [MTLRenderPipelineDescriptor new];
+        pipeline.vertexFunction = [library newFunctionWithName:@"metaco_vertex"];
+        pipeline.fragmentFunction = [library newFunctionWithName:@"metaco_fragment"];
+        pipeline.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        if (!pipeline.vertexFunction || !pipeline.fragmentFunction) return nil;
+        self.renderPipeline = [device newRenderPipelineStateWithDescriptor:pipeline error:nil];
+        if (!self.renderPipeline) return nil;
+
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead;
+        desc.storageMode = device.hasUnifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+        self.texture = [device newTextureWithDescriptor:desc];
+        if (!self.texture) return nil;
 
         self.wantsLayer = YES;
         self.metalLayer = [CAMetalLayer layer];
+        if (!self.metalLayer) return nil;
         self.metalLayer.device = device;
         self.metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        self.metalLayer.framebufferOnly = NO;
-        self.metalLayer.displaySyncEnabled = NO;  // Disable VSync for max FPS
+        self.metalLayer.framebufferOnly = YES;
+        self.metalLayer.displaySyncEnabled = NO;
         self.metalLayer.frame = frame;
         self.metalLayer.drawableSize = CGSizeMake(w, h);
         self.layer = self.metalLayer;
-
-        self.commandQueue = [device newCommandQueue];
-
-        // Create texture for pixel data
-        MTLTextureDescriptor *texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                           width:w
-                                                                                          height:h
-                                                                                       mipmapped:NO];
-        texDesc.usage = MTLTextureUsageShaderRead;
-        self.texture = [device newTextureWithDescriptor:texDesc];
     }
     return self;
 }
 
 - (void)updatePixels:(const uint8_t *)data {
-    MTLRegion region = MTLRegionMake2D(0, 0, self.texWidth, self.texHeight);
-    [self.texture replaceRegion:region mipmapLevel:0 withBytes:data bytesPerRow:self.texWidth * 4];
+    [self.texture replaceRegion:MTLRegionMake2D(0, 0, self.texWidth, self.texHeight)
+                    mipmapLevel:0 withBytes:data bytesPerRow:(size_t)self.texWidth * 4];
 }
 
-- (void)present {
-    id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
-    if (!drawable) return;
-
-    id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
-
-    // Blit texture to drawable
-    id<MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
-
-    [blitEncoder copyFromTexture:self.texture
-                     sourceSlice:0
-                     sourceLevel:0
-                    sourceOrigin:MTLOriginMake(0, 0, 0)
-                      sourceSize:MTLSizeMake(self.texWidth, self.texHeight, 1)
-                       toTexture:drawable.texture
-                destinationSlice:0
-                destinationLevel:0
-               destinationOrigin:MTLOriginMake(0, 0, 0)];
-
-    [blitEncoder endEncoding];
-
-    [commandBuffer presentDrawable:drawable];
-    [commandBuffer commit];
-}
-
-#pragma mark - Compute Shader Support
-
-- (BOOL)compileComputeShader:(NSString *)mslSource error:(NSError **)error {
-    // Compile MSL source to library
-    id<MTLLibrary> library = [self.device newLibraryWithSource:mslSource
-                                                       options:nil
-                                                         error:error];
-    if (!library) return NO;
-
-    // Get compute function
-    id<MTLFunction> computeFunc = [library newFunctionWithName:@"compute_shader"];
-    if (!computeFunc) {
-        if (error) *error = [NSError errorWithDomain:@"Metaco" code:1
-                                            userInfo:@{NSLocalizedDescriptionKey: @"compute_shader function not found"}];
+- (BOOL)renderTexture:(id<MTLTexture>)source toTexture:(id<MTLTexture>)target
+       commandBuffer:(id<MTLCommandBuffer>)commandBuffer error:(NSError **)error {
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    if (!encoder) {
+        native_error(error, @"Failed to create render encoder");
         return NO;
     }
-
-    // Create compute pipeline
-    self.computePipeline = [self.device newComputePipelineStateWithFunction:computeFunc error:error];
-    if (!self.computePipeline) return NO;
-
-    // Create output texture (writable)
-    MTLTextureDescriptor *texDesc = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                     width:self.texWidth
-                                    height:self.texHeight
-                                 mipmapped:NO];
-    texDesc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
-    self.outputTexture = [self.device newTextureWithDescriptor:texDesc];
-
-    // Create uniform buffer (256 bytes should be enough for most shaders)
-    self.uniformBuffer = [self.device newBufferWithLength:256
-                                                  options:MTLResourceStorageModeShared];
-
-    self.hasComputeShader = YES;
+    [encoder setRenderPipelineState:self.renderPipeline];
+    [encoder setFragmentTexture:source atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
     return YES;
 }
 
-- (void)dispatchComputeWithUniforms:(const void *)uniformData length:(NSUInteger)length {
-    if (!self.hasComputeShader) return;
-
-    // Update uniform buffer
-    memcpy(self.uniformBuffer.contents, uniformData, MIN(length, 256));
-
+- (id<MTLCommandBuffer>)presentTexture:(id<MTLTexture>)texture error:(NSError **)error {
+    id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
+    if (!drawable) return nil; // An occluded window can temporarily have no drawable.
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
-    id<MTLComputeCommandEncoder> computeEncoder = [commandBuffer computeCommandEncoder];
-
-    [computeEncoder setComputePipelineState:self.computePipeline];
-    [computeEncoder setTexture:self.outputTexture atIndex:0];
-    [computeEncoder setBuffer:self.uniformBuffer offset:0 atIndex:0];
-
-    // Calculate optimal thread group size
-    NSUInteger threadGroupSize = self.computePipeline.maxTotalThreadsPerThreadgroup;
-    NSUInteger threadGroupWidth = 16;
-    NSUInteger threadGroupHeight = 16;
-
-    if (threadGroupWidth * threadGroupHeight > threadGroupSize) {
-        threadGroupWidth = 8;
-        threadGroupHeight = 8;
+    if (!commandBuffer) {
+        native_error(error, @"Failed to create render command buffer");
+        return nil;
     }
-
-    MTLSize threadsPerGroup = MTLSizeMake(threadGroupWidth, threadGroupHeight, 1);
-    MTLSize threadGroups = MTLSizeMake(
-        (self.texWidth + threadGroupWidth - 1) / threadGroupWidth,
-        (self.texHeight + threadGroupHeight - 1) / threadGroupHeight,
-        1
-    );
-
-    [computeEncoder dispatchThreadgroups:threadGroups threadsPerThreadgroup:threadsPerGroup];
-    [computeEncoder endEncoding];
-
-    [commandBuffer commit];
-    [commandBuffer waitUntilCompleted];
+    if (![self renderTexture:texture toTexture:drawable.texture commandBuffer:commandBuffer error:error]) return nil;
+    [commandBuffer presentDrawable:drawable];
+    return commandBuffer;
 }
 
-- (void)presentCompute {
-    if (!self.hasComputeShader) return;
+- (BOOL)compileComputeShader:(NSString *)mslSource error:(NSError **)error {
+    id<MTLLibrary> library = [self.device newLibraryWithSource:mslSource options:nil error:error];
+    if (!library) return NO;
+    id<MTLFunction> function = [library newFunctionWithName:@"compute_shader"];
+    if (!function) {
+        native_error(error, @"compute_shader function not found");
+        return NO;
+    }
+    id<MTLComputePipelineState> pipeline = [self.device newComputePipelineStateWithFunction:function error:error];
+    if (!pipeline) return NO;
 
-    id<CAMetalDrawable> drawable = [self.metalLayer nextDrawable];
-    if (!drawable) return;
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                     width:self.texWidth height:self.texHeight mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> output = [self.device newTextureWithDescriptor:desc];
+    id<MTLBuffer> uniforms = [self.device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    if (!output || !uniforms || !uniforms.contents) {
+        native_error(error, @"Failed to allocate compute resources");
+        return NO;
+    }
 
+    // Publish the new state only after every resource has been created.
+    self.computePipeline = pipeline;
+    self.outputTexture = output;
+    self.uniformBuffer = uniforms;
+    return YES;
+}
+
+- (id<MTLCommandBuffer>)dispatchComputeWithUniforms:(const void *)data length:(NSUInteger)length
+                                            error:(NSError **)error {
+    if (!self.hasComputeShader || length > 256) {
+        native_error(error, @"Invalid compute state or uniform size");
+        return nil;
+    }
+    memset(self.uniformBuffer.contents, 0, 256);
+    memcpy(self.uniformBuffer.contents, data, length);
     id<MTLCommandBuffer> commandBuffer = [self.commandQueue commandBuffer];
-    id<MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    if (!commandBuffer || !encoder) {
+        native_error(error, @"Failed to create compute command buffer or encoder");
+        return nil;
+    }
+    [encoder setComputePipelineState:self.computePipeline];
+    [encoder setTexture:self.outputTexture atIndex:0];
+    [encoder setBuffer:self.uniformBuffer offset:0 atIndex:0];
 
-    // Blit from compute output to drawable
-    [blitEncoder copyFromTexture:self.outputTexture
-                     sourceSlice:0
-                     sourceLevel:0
-                    sourceOrigin:MTLOriginMake(0, 0, 0)
-                      sourceSize:MTLSizeMake(self.texWidth, self.texHeight, 1)
-                       toTexture:drawable.texture
-                destinationSlice:0
-                destinationLevel:0
-               destinationOrigin:MTLOriginMake(0, 0, 0)];
-
-    [blitEncoder endEncoding];
-    [commandBuffer presentDrawable:drawable];
-    [commandBuffer commit];
+    NSUInteger limit = MIN(self.computePipeline.maxTotalThreadsPerThreadgroup,
+                           self.device.maxThreadsPerThreadgroup.width);
+    NSUInteger width = MAX((NSUInteger)1, MIN(self.computePipeline.threadExecutionWidth, limit));
+    // Use complete rows that divide the image, so even older GPUs dispatch no extra pixels.
+    while ((NSUInteger)self.texWidth % width != 0) width--;
+    [encoder dispatchThreadgroups:MTLSizeMake(self.texWidth / width, self.texHeight, 1)
+           threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    [encoder endEncoding];
+    return commandBuffer;
 }
 
 @end
@@ -249,15 +210,16 @@
         // Try to use Metal
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (device) {
-            self.useMetal = YES;
             self.metalView = [[MetacoMetalView alloc] initWithFrame:NSMakeRect(0, 0, width, height)
                                                            device:device
                                                             width:width
                                                            height:height];
+        }
+        self.useMetal = self.metalView != nil;
+        if (self.useMetal) {
             [self setContentView:self.metalView];
         } else {
-            // Fallback to bitmap
-            self.useMetal = NO;
+            // Device or rendering resource creation failed: use the bitmap path.
             self.bitmapRep = [[NSBitmapImageRep alloc]
                 initWithBitmapDataPlanes:NULL
                               pixelsWide:width
@@ -267,13 +229,22 @@
                                 hasAlpha:YES
                                 isPlanar:NO
                           colorSpaceName:NSDeviceRGBColorSpace
-                             bytesPerRow:width * 4
+                            bitmapFormat:NSBitmapFormatAlphaNonpremultiplied
+                             bytesPerRow:(size_t)width * 4
                             bitsPerPixel:32];
 
+            if (!self.bitmapRep || !self.bitmapRep.bitmapData) {
+                [self close];
+                return nil;
+            }
             NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(width, height)];
             [image addRepresentation:self.bitmapRep];
 
             self.imageView = [[NSImageView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
+            if (!image || !self.imageView) {
+                [self close];
+                return nil;
+            }
             [self.imageView setImage:image];
             [self.imageView setImageScaling:NSImageScaleAxesIndependently];
             [self setContentView:self.imageView];
@@ -379,7 +350,6 @@ static size_t pixel_byte_length(int width, int height) {
 static void release_window(void *ptr) {
     @autoreleasepool {
         MetacoWindow *window = (__bridge_transfer MetacoWindow *)ptr;
-        [window.metalView cleanup];
         window.delegate = nil;
         [window close];
     }
@@ -485,20 +455,60 @@ static VALUE cocoa_set_pixels(VALUE self, VALUE value, VALUE buffer, VALUE width
     return Qnil;
 }
 
-static VALUE cocoa_present(VALUE self, VALUE value) {
+static void *submit_command(void *ptr) {
+    @autoreleasepool {
+        id<MTLCommandBuffer> command = (__bridge id<MTLCommandBuffer>)ptr;
+        [command commit];
+        [command waitUntilCompleted];
+    }
+    return NULL;
+}
+
+static VALUE submit_without_gvl(VALUE ptr) {
+    rb_thread_call_without_gvl(submit_command, (void *)ptr, NULL, NULL);
+    return Qnil;
+}
+
+static void finish_command(id<MTLCommandBuffer> command, int *state, NSError **error) {
+    if (!command) return;
+    // ponytail: one frame in flight; add buffering only if synchronous presentation limits throughput.
+    // rb_protect also catches interrupts while the GVL is released/reacquired.
+    rb_protect(submit_without_gvl, (VALUE)(__bridge void *)command, state);
+    if (!*state && command.status != MTLCommandBufferStatusCompleted) {
+        if (command.error) *error = command.error;
+        else native_error(error, @"GPU command failed");
+    }
+}
+
+static VALUE cocoa_present_frame(VALUE value, BOOL compute) {
     MetacoHandle *handle = get_handle(value, NO);
+    char message[1024] = "";
+    int state = 0;
+    handle->busy = YES;
     @autoreleasepool {
         MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
-        if (window.useMetal) {
-            [window.metalView present];
+        NSError *error = nil;
+        if (compute && (!window.useMetal || !window.metalView.hasComputeShader)) {
+            native_error(&error, @"Compute shader not compiled");
+        } else if (window.useMetal) {
+            id<MTLTexture> texture = compute ? window.metalView.outputTexture : window.metalView.texture;
+            id<MTLCommandBuffer> command = [window.metalView presentTexture:texture error:&error];
+            finish_command(command, &state, &error);
         } else {
             [window.imageView setNeedsDisplay:YES];
             [window displayIfNeeded];
         }
+        if (error) snprintf(message, sizeof(message), "%s", error.localizedDescription.UTF8String);
     }
+    handle->busy = NO;
     RB_GC_GUARD(value);
+    if (state) rb_jump_tag(state);
+    if (message[0]) rb_raise(rb_eRuntimeError, "%s", message);
     return Qnil;
 }
+
+static VALUE cocoa_present(VALUE self, VALUE value) { return cocoa_present_frame(value, NO); }
+static VALUE cocoa_present_compute(VALUE self, VALUE value) { return cocoa_present_frame(value, YES); }
 
 // Called only via rb_protect: no owning Objective-C locals or autorelease pools
 // may live in a frame that Ruby's longjmp can bypass.
@@ -606,32 +616,29 @@ static VALUE cocoa_compile_compute_shader(VALUE self, VALUE value, VALUE msl_sou
 
 static VALUE cocoa_dispatch_compute(VALUE self, VALUE value, VALUE uniform_data) {
     Check_Type(uniform_data, T_STRING);
+    if (RSTRING_LEN(uniform_data) > 256) rb_raise(rb_eArgError, "Uniform data must be at most 256 bytes");
     MetacoHandle *handle = get_handle(value, NO);
-    BOOL compiled;
+    char message[1024] = "";
+    int state = 0;
+    handle->busy = YES;
     @autoreleasepool {
         MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
-        compiled = window.useMetal && window.metalView.hasComputeShader;
-        if (compiled) {
-            [window.metalView dispatchComputeWithUniforms:RSTRING_PTR(uniform_data)
-                                                  length:RSTRING_LEN(uniform_data)];
+        NSError *error = nil;
+        if (!window.useMetal || !window.metalView.hasComputeShader) {
+            native_error(&error, @"Compute shader not compiled");
+        } else {
+            id<MTLCommandBuffer> command = [window.metalView dispatchComputeWithUniforms:RSTRING_PTR(uniform_data)
+                                                                                length:RSTRING_LEN(uniform_data)
+                                                                                 error:&error];
+            finish_command(command, &state, &error);
         }
+        if (error) snprintf(message, sizeof(message), "%s", error.localizedDescription.UTF8String);
     }
+    handle->busy = NO;
     RB_GC_GUARD(uniform_data);
     RB_GC_GUARD(value);
-    if (!compiled) rb_raise(rb_eRuntimeError, "Compute shader not compiled");
-    return Qnil;
-}
-
-static VALUE cocoa_present_compute(VALUE self, VALUE value) {
-    MetacoHandle *handle = get_handle(value, NO);
-    BOOL compiled;
-    @autoreleasepool {
-        MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
-        compiled = window.useMetal && window.metalView.hasComputeShader;
-        if (compiled) [window.metalView presentCompute];
-    }
-    RB_GC_GUARD(value);
-    if (!compiled) rb_raise(rb_eRuntimeError, "Compute shader not compiled");
+    if (state) rb_jump_tag(state);
+    if (message[0]) rb_raise(rb_eRuntimeError, "%s", message);
     return Qnil;
 }
 
