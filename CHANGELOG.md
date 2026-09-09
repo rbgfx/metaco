@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-09-09
 
 - Replace integer window pointers with GC-managed `Metaco::Window` handles. Validate closed handles, main-thread access, dimensions, and pixel buffer capacity.
 - Preserve Ruby exception cleanup, UTF-8/NUL key input, and right/middle mouse and drag events. Complete the unsupported-platform API without hiding macOS load errors.
