@@ -2,10 +2,9 @@
 
 require_relative "metaco/version"
 
-begin
+if RUBY_PLATFORM.include?("darwin")
   require "metaco/metaco"
-rescue LoadError
-  # Extension not compiled - this is expected on non-macOS platforms
+else
   module Metaco
     def self.init
       raise LoadError, "Metaco is only available on macOS"
@@ -32,6 +31,26 @@ rescue LoadError
     end
 
     def self.should_close?(_handle)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.metal_compute_available?(_handle)
+      false
+    end
+
+    def self.has_compute_shader?(_handle)
+      false
+    end
+
+    def self.compile_compute_shader(_handle, _source)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.dispatch_compute(_handle, _uniforms)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.present_compute(_handle)
       raise LoadError, "Metaco is only available on macOS"
     end
   end

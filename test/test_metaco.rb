@@ -101,14 +101,30 @@ class TestMetaco < Test::Unit::TestCase
 
     test "window_create returns a handle" do
       handle = Metaco.window_create(320, 240, "Test")
-      assert_kind_of Integer, handle
-      assert_operator handle, :>, 0
+      assert_kind_of Metaco::Window, handle
       Metaco.window_destroy(handle)
     end
 
     test "window_destroy returns nil" do
       handle = Metaco.window_create(320, 240, "Test")
       assert_nil Metaco.window_destroy(handle)
+    end
+
+    test "closed handles are safe and cannot refer to a later window" do
+      handle = Metaco.window_create(1, 1, "Closed")
+      Metaco.window_destroy(handle)
+      replacement = Metaco.window_create(1, 1, "Replacement")
+      assert_nil Metaco.window_destroy(handle)
+      {
+        should_close?: [], poll_events: [], present: [], metal_compute_available?: [],
+        has_compute_shader?: [], present_compute: [], set_pixels: ["\0" * 4, 1, 1],
+        compile_compute_shader: [""], dispatch_compute: [""]
+      }.each do |method, args|
+        assert_raise(ArgumentError) { Metaco.public_send(method, handle, *args) }
+      end
+      assert_false Metaco.should_close?(replacement)
+    ensure
+      Metaco.window_destroy(replacement) if replacement
     end
 
     test "should_close? returns false for new window" do
@@ -167,6 +183,12 @@ class TestMetaco < Test::Unit::TestCase
       end
     end
 
+    test "set_pixels rejects dimensions that differ from the window" do
+      [[1, 1], [640, 480], [240, 320]].each do |w, h|
+        assert_raise(ArgumentError) { Metaco.set_pixels(@handle, "\0" * (w * h * 4), w, h) }
+      end
+    end
+
     test "present returns nil" do
       width = 320
       height = 240
@@ -217,31 +239,31 @@ class TestMetaco < Test::Unit::TestCase
 
     test "window with empty title" do
       handle = Metaco.window_create(320, 240, "")
-      assert_kind_of Integer, handle
+      assert_kind_of Metaco::Window, handle
       Metaco.window_destroy(handle)
     end
 
     test "window with Japanese title" do
       handle = Metaco.window_create(320, 240, "テストウィンドウ")
-      assert_kind_of Integer, handle
+      assert_kind_of Metaco::Window, handle
       Metaco.window_destroy(handle)
     end
 
     test "window with emoji title" do
       handle = Metaco.window_create(320, 240, "Test 🎮")
-      assert_kind_of Integer, handle
+      assert_kind_of Metaco::Window, handle
       Metaco.window_destroy(handle)
     end
 
     test "small window size" do
       handle = Metaco.window_create(1, 1, "Tiny")
-      assert_kind_of Integer, handle
+      assert_kind_of Metaco::Window, handle
       Metaco.window_destroy(handle)
     end
 
     test "large window size" do
       handle = Metaco.window_create(1920, 1080, "Large")
-      assert_kind_of Integer, handle
+      assert_kind_of Metaco::Window, handle
       Metaco.window_destroy(handle)
     end
   end
@@ -264,7 +286,7 @@ class TestMetaco < Test::Unit::TestCase
     test "create multiple windows" do
       3.times do |i|
         handle = Metaco.window_create(320, 240, "Window #{i}")
-        assert_kind_of Integer, handle
+        assert_kind_of Metaco::Window, handle
         @handles << handle
       end
       assert_equal 3, @handles.size
