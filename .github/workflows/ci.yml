@@ -4,6 +4,12 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_metal:
+        description: Run mandatory GPU checks on a macOS runner labeled metal
+        type: boolean
+        default: false
 jobs:
   test:
     runs-on: macos-latest
@@ -22,8 +28,27 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
+          bundler: "2.6.9"
           bundler-cache: true
       - name: Compile extension
         run: bundle exec rake compile
       - name: Run tests
         run: bundle exec rake test
+        env:
+          MTL_DEBUG_LAYER: "1"
+  metal:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_metal
+    runs-on: [self-hosted, macOS, metal]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler: "2.6.9"
+          bundler-cache: true
+      - name: Verify native rendering with Metal validation
+        run: bundle exec rake test
+        env:
+          METACO_REQUIRE_METAL: "1"
+          MTL_DEBUG_LAYER: "1"
+          MTL_SHADER_VALIDATION: "1"

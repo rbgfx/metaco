@@ -1,0 +1,1 @@
+metaco_test.o: $(srcdir)/../../ext/metaco/metaco.m

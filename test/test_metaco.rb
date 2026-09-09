@@ -4,7 +4,7 @@ require "test_helper"
 
 class TestMetaco < Test::Unit::TestCase
   def self.gui_available?
-    return false if ENV["CI"]
+    return false if ENV["METACO_SKIP_GUI"] == "1"
     return false unless RUBY_PLATFORM.include?("darwin")
 
     true

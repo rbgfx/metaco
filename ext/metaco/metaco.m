@@ -65,7 +65,10 @@ static void native_error(NSError **error, NSString *message) {
         MTLTextureDescriptor *desc = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
         desc.usage = MTLTextureUsageShaderRead;
-        desc.storageMode = device.hasUnifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+        desc.storageMode = MTLStorageModeManaged;
+        if (@available(macOS 10.15, *)) {
+            if (device.hasUnifiedMemory) desc.storageMode = MTLStorageModeShared;
+        }
         self.texture = [device newTextureWithDescriptor:desc];
         if (!self.texture) return nil;
 
@@ -169,6 +172,11 @@ static void native_error(NSError **error, NSString *message) {
 
     NSUInteger limit = MIN(self.computePipeline.maxTotalThreadsPerThreadgroup,
                            self.device.maxThreadsPerThreadgroup.width);
+    if (!limit) {
+        [encoder endEncoding];
+        native_error(error, @"Compute pipeline has no supported threadgroup size");
+        return nil;
+    }
     NSUInteger width = MAX((NSUInteger)1, MIN(self.computePipeline.threadExecutionWidth, limit));
     // Use complete rows that divide the image, so even older GPUs dispatch no extra pixels.
     while ((NSUInteger)self.texWidth % width != 0) width--;
@@ -480,9 +488,15 @@ static void finish_command(id<MTLCommandBuffer> command, int *state, NSError **e
     }
 }
 
+// Only call inside rb_protect (directly or through events_to_ruby).
+static VALUE string_to_ruby(VALUE ptr) {
+    __unsafe_unretained NSString *text = (__bridge NSString *)(void *)ptr;
+    return rb_utf8_str_new(text.UTF8String, [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+}
+
 static VALUE cocoa_present_frame(VALUE value, BOOL compute) {
     MetacoHandle *handle = get_handle(value, NO);
-    char message[1024] = "";
+    VALUE message = Qnil;
     int state = 0;
     handle->busy = YES;
     @autoreleasepool {
@@ -498,12 +512,14 @@ static VALUE cocoa_present_frame(VALUE value, BOOL compute) {
             [window.imageView setNeedsDisplay:YES];
             [window displayIfNeeded];
         }
-        if (error) snprintf(message, sizeof(message), "%s", error.localizedDescription.UTF8String);
+        if (error && !state) {
+            message = rb_protect(string_to_ruby, (VALUE)(__bridge void *)error.localizedDescription, &state);
+        }
     }
     handle->busy = NO;
     RB_GC_GUARD(value);
     if (state) rb_jump_tag(state);
-    if (message[0]) rb_raise(rb_eRuntimeError, "%s", message);
+    if (!NIL_P(message)) rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, message));
     return Qnil;
 }
 
@@ -526,8 +542,7 @@ static VALUE events_to_ruby(VALUE ptr) {
         if (dict[@"char"]) {
             __unsafe_unretained NSString *characters = dict[@"char"];
             rb_hash_aset(hash, ID2SYM(rb_intern("char")),
-                         rb_utf8_str_new(characters.UTF8String,
-                                         [characters lengthOfBytesUsingEncoding:NSUTF8StringEncoding]));
+                         string_to_ruby((VALUE)(__bridge void *)characters));
         }
         if (dict[@"x"]) {
             rb_hash_aset(hash, ID2SYM(rb_intern("x")), DBL2NUM([dict[@"x"] doubleValue]));
@@ -547,6 +562,7 @@ static VALUE cocoa_poll_events(VALUE self, VALUE value) {
     MetacoHandle *handle = get_handle(value, NO);
     int state = 0;
     VALUE events;
+    handle->busy = YES;
     @autoreleasepool {
         MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
         NSEvent *event;
@@ -562,6 +578,7 @@ static VALUE cocoa_poll_events(VALUE self, VALUE value) {
         events = rb_protect(events_to_ruby, (VALUE)(__bridge void *)window.pendingEvents, &state);
         if (!state) [window.pendingEvents removeAllObjects];
     }
+    handle->busy = NO;
     RB_GC_GUARD(value);
     if (state) rb_jump_tag(state);
     return events;
@@ -592,7 +609,9 @@ static VALUE cocoa_metal_compute_available(VALUE self, VALUE value) {
 static VALUE cocoa_compile_compute_shader(VALUE self, VALUE value, VALUE msl_source) {
     Check_Type(msl_source, T_STRING);
     MetacoHandle *handle = get_handle(value, NO);
-    char message[1024] = "";
+    VALUE message = Qnil;
+    int state = 0;
+    handle->busy = YES;
     @autoreleasepool {
         MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
         NSString *source = [[NSString alloc] initWithBytes:RSTRING_PTR(msl_source)
@@ -600,17 +619,21 @@ static VALUE cocoa_compile_compute_shader(VALUE self, VALUE value, VALUE msl_sou
                                                 encoding:NSUTF8StringEncoding];
         NSError *error = nil;
         if (!window.useMetal) {
-            snprintf(message, sizeof(message), "Metal not available");
+            native_error(&error, @"Metal not available");
         } else if (!source) {
-            snprintf(message, sizeof(message), "Shader source must contain valid UTF-8");
-        } else if (![window.metalView compileComputeShader:source error:&error]) {
-            snprintf(message, sizeof(message), "Failed to compile shader: %s",
-                     error.localizedDescription.UTF8String ?: "Unknown error");
+            native_error(&error, @"Shader source must contain valid UTF-8");
+        } else if (![window.metalView compileComputeShader:source error:&error] && !error) {
+            native_error(&error, @"Failed to compile shader");
+        }
+        if (error) {
+            message = rb_protect(string_to_ruby, (VALUE)(__bridge void *)error.localizedDescription, &state);
         }
     }
+    handle->busy = NO;
     RB_GC_GUARD(msl_source);
     RB_GC_GUARD(value);
-    if (message[0]) rb_raise(rb_eRuntimeError, "%s", message);
+    if (state) rb_jump_tag(state);
+    if (!NIL_P(message)) rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, message));
     return Qtrue;
 }
 
@@ -618,7 +641,7 @@ static VALUE cocoa_dispatch_compute(VALUE self, VALUE value, VALUE uniform_data)
     Check_Type(uniform_data, T_STRING);
     if (RSTRING_LEN(uniform_data) > 256) rb_raise(rb_eArgError, "Uniform data must be at most 256 bytes");
     MetacoHandle *handle = get_handle(value, NO);
-    char message[1024] = "";
+    VALUE message = Qnil;
     int state = 0;
     handle->busy = YES;
     @autoreleasepool {
@@ -632,13 +655,15 @@ static VALUE cocoa_dispatch_compute(VALUE self, VALUE value, VALUE uniform_data)
                                                                                  error:&error];
             finish_command(command, &state, &error);
         }
-        if (error) snprintf(message, sizeof(message), "%s", error.localizedDescription.UTF8String);
+        if (error && !state) {
+            message = rb_protect(string_to_ruby, (VALUE)(__bridge void *)error.localizedDescription, &state);
+        }
     }
     handle->busy = NO;
     RB_GC_GUARD(uniform_data);
     RB_GC_GUARD(value);
     if (state) rb_jump_tag(state);
-    if (message[0]) rb_raise(rb_eRuntimeError, "%s", message);
+    if (!NIL_P(message)) rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, message));
     return Qnil;
 }
 
