@@ -10,7 +10,7 @@ Gem::Specification.new do |spec|
 
   spec.summary = "Native macOS Cocoa/Metal bridge for Ruby graphics applications"
   spec.description = "A Ruby C extension providing native macOS window management and Metal GPU acceleration for graphics applications."
-  spec.homepage = "https://github.com/ydah/metaco"
+  spec.homepage = "https://github.com/rbgfx/metaco"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.0.0"
 
