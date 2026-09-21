@@ -30,3 +30,4 @@ end
 
 task test: [:compile, :test_native]
 task default: :test
+task verify: :test
