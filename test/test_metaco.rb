@@ -62,6 +62,15 @@ class TestMetaco < Test::Unit::TestCase
     test "should_close? method is defined" do
       assert_respond_to Metaco, :should_close?
     end
+
+    test "readback and size methods are defined" do
+      assert_respond_to Metaco, :read_pixels
+      assert_respond_to Metaco, :window_size
+      assert_respond_to Metaco, :framebuffer_size
+      if RUBY_PLATFORM.include?("darwin")
+        assert_raise(ArgumentError) { Metaco.read_pixels(Object.new, source: :unknown) }
+      end
+    end
   end
 
   sub_test_case "compute shader methods" do

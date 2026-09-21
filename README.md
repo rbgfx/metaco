@@ -119,12 +119,14 @@ Metaco.window_destroy(handle)
 | `window_destroy(handle)` | Close and release the window; repeated calls are safe |
 | `should_close?(handle)` | Check if window should close |
 | `poll_events(handle)` | Poll and return pending events |
+| `window_size(handle)` / `framebuffer_size(handle)` | Return `[width, height]` |
 
 ### Rendering
 
 | Method | Description |
 |--------|-------------|
 | `set_pixels(handle, buffer, width, height)` | Set pixel data (RGBA format) |
+| `read_pixels(handle, source: :compute)` | Read top-down RGBA8 pixels from `:compute` or `:set_pixels` |
 | `present(handle)` | Present the frame and wait for GPU completion |
 
 ### Compute Shaders
@@ -155,6 +157,7 @@ Metaco.window_destroy(handle)
 - Compute shaders use the entry point `compute_shader`, output texture 0, and a uniform buffer at index 0. Uniforms may contain 0–256 bytes; remaining bytes are zeroed on every dispatch. Larger inputs raise `ArgumentError`. Shader uniform structures must fit within 256 bytes.
 - Failed compilation preserves the previous shader and its resources. Dispatch and compute presentation require a compiled shader. GPU command failures raise `RuntimeError` after native resources have been cleaned up.
 - Dispatch covers exactly the window's pixels. Threadgroup dimensions may vary by pipeline and image width; shaders must not assume a fixed group size. The example's bounds check also makes it safe with other dispatch implementations.
+- `read_pixels` copies the selected texture into CPU-visible memory before returning. It requires an open window and a completed render. GPU readback has not been verified on a Metal device in headless CI.
 - Presentation is synchronous so pixel uploads cannot overwrite an in-flight frame. An occluded window may have no drawable, in which case presentation is skipped. Rendering resource allocation failures select the bitmap fallback; compute availability then returns `false`.
 - On unsupported platforms both compute availability queries return `false`, and other APIs raise `LoadError`. On macOS, native extension loading errors retain their original diagnostics.
 

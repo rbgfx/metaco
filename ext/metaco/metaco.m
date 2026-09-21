@@ -678,6 +678,77 @@ static VALUE cocoa_has_compute_shader(VALUE self, VALUE value) {
     return result ? Qtrue : Qfalse;
 }
 
+static VALUE cocoa_window_size(VALUE self, VALUE value) {
+    MetacoHandle *handle = get_handle(value, NO);
+    VALUE dimensions = rb_ary_new_from_args(2, INT2NUM(handle->width), INT2NUM(handle->height));
+    RB_GC_GUARD(value);
+    return dimensions;
+}
+
+static VALUE cocoa_read_pixels_native(VALUE self, VALUE value, VALUE source) {
+    if (!SYMBOL_P(source)) rb_raise(rb_eTypeError, "source must be a Symbol");
+    ID source_id = SYM2ID(source);
+    BOOL compute = source_id == rb_intern("compute");
+    if (!compute && source_id != rb_intern("set_pixels")) {
+        rb_raise(rb_eArgError, "source must be :compute or :set_pixels");
+    }
+    MetacoHandle *handle = get_handle(value, NO);
+    VALUE output = rb_str_new(NULL, handle->byte_length);
+    VALUE message = Qnil;
+    int state = 0;
+    handle->busy = YES;
+    @autoreleasepool {
+        MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
+        NSError *error = nil;
+        if (!window.useMetal) {
+            if (compute) native_error(&error, @"Metal compute is not available");
+            else memcpy(RSTRING_PTR(output), window.bitmapRep.bitmapData, handle->byte_length);
+        } else {
+            id<MTLTexture> sourceTexture = compute ? window.metalView.outputTexture : window.metalView.texture;
+            if (!sourceTexture) {
+                native_error(&error, @"Pixel source is not available");
+            } else {
+                MTLTextureDescriptor *desc = [MTLTextureDescriptor
+                    texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                             width:handle->width height:handle->height mipmapped:NO];
+                desc.storageMode = MTLStorageModeManaged;
+                if (@available(macOS 10.15, *)) {
+                    if (window.metalView.device.hasUnifiedMemory) desc.storageMode = MTLStorageModeShared;
+                }
+                desc.usage = MTLTextureUsageShaderRead;
+                id<MTLTexture> staging = [window.metalView.device newTextureWithDescriptor:desc];
+                id<MTLCommandBuffer> command = [window.metalView.commandQueue commandBuffer];
+                id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+                if (!staging || !command || !blit) {
+                    native_error(&error, @"Failed to allocate readback resources");
+                } else {
+                    [blit copyFromTexture:sourceTexture sourceSlice:0 sourceLevel:0
+                            sourceOrigin:MTLOriginMake(0, 0, 0)
+                              sourceSize:MTLSizeMake(handle->width, handle->height, 1)
+                               toTexture:staging destinationSlice:0 destinationLevel:0
+                       destinationOrigin:MTLOriginMake(0, 0, 0)];
+                    if (desc.storageMode == MTLStorageModeManaged) [blit synchronizeResource:staging];
+                    [blit endEncoding];
+                    finish_command(command, &state, &error);
+                    if (!state && !error) {
+                        [staging getBytes:RSTRING_PTR(output) bytesPerRow:(size_t)handle->width * 4
+                               fromRegion:MTLRegionMake2D(0, 0, handle->width, handle->height)
+                              mipmapLevel:0];
+                    }
+                }
+            }
+        }
+        if (error && !state) {
+            message = rb_protect(string_to_ruby, (VALUE)(__bridge void *)error.localizedDescription, &state);
+        }
+    }
+    handle->busy = NO;
+    RB_GC_GUARD(value);
+    if (state) rb_jump_tag(state);
+    if (!NIL_P(message)) rb_exc_raise(rb_exc_new_str(rb_eRuntimeError, message));
+    return output;
+}
+
 void Init_metaco(void) {
     VALUE mMetaco = rb_define_module("Metaco");
     cMetacoWindow = rb_define_class_under(mMetaco, "Window", rb_cObject);
@@ -698,4 +769,7 @@ void Init_metaco(void) {
     rb_define_module_function(mMetaco, "dispatch_compute", cocoa_dispatch_compute, 2);
     rb_define_module_function(mMetaco, "present_compute", cocoa_present_compute, 1);
     rb_define_module_function(mMetaco, "has_compute_shader?", cocoa_has_compute_shader, 1);
+    rb_define_module_function(mMetaco, "window_size", cocoa_window_size, 1);
+    rb_define_module_function(mMetaco, "framebuffer_size", cocoa_window_size, 1);
+    rb_define_module_function(mMetaco, "read_pixels_native", cocoa_read_pixels_native, 2);
 }

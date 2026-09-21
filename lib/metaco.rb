@@ -4,6 +4,11 @@ require_relative "metaco/version"
 
 if RUBY_PLATFORM.include?("darwin")
   require "metaco/metaco"
+  module Metaco
+    def self.read_pixels(handle, source: :compute)
+      read_pixels_native(handle, source)
+    end
+  end
 else
   module Metaco
     def self.init
