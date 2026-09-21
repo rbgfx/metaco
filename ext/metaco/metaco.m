@@ -31,6 +31,7 @@ static void native_error(NSError **error, NSString *message) {
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLTexture>> *computeTextures;
 @property (nonatomic, readonly) BOOL hasComputeShader;
 - (BOOL)resizeToWidth:(int)width height:(int)height error:(NSError **)error;
+- (void)releaseResources;
 @end
 
 @implementation MetacoMetalView
@@ -191,6 +192,21 @@ static void native_error(NSError **error, NSString *message) {
     self.texHeight = height;
     self.metalLayer.drawableSize = CGSizeMake(width, height);
     return YES;
+}
+
+- (void)releaseResources {
+    self.metalLayer.delegate = nil;
+    [self.metalLayer removeFromSuperlayer];
+    self.layer = nil;
+    self.metalLayer = nil;
+    self.computeTextures = nil;
+    self.outputTexture = nil;
+    self.uniformBuffer = nil;
+    self.computePipeline = nil;
+    self.renderPipeline = nil;
+    self.texture = nil;
+    self.commandQueue = nil;
+    self.device = nil;
 }
 
 - (id<MTLCommandBuffer>)dispatchComputeWithUniforms:(const void *)data length:(NSUInteger)length
@@ -551,6 +567,7 @@ static void release_window(void *ptr) {
         window.delegate = nil;
         [window orderOut:nil];
         [window setContentView:nil];
+        [window.metalView releaseResources];
         window.metalView = nil;
         window.imageView = nil;
         window.bitmapRep = nil;
