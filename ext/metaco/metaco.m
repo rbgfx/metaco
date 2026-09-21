@@ -193,6 +193,16 @@ static void native_error(NSError **error, NSString *message) {
 
 @end
 
+static NSArray<NSString *> *event_modifiers(NSEvent *event) {
+    NSEventModifierFlags flags = event.modifierFlags;
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+    if (flags & NSEventModifierFlagShift) [result addObject:@"shift"];
+    if (flags & NSEventModifierFlagControl) [result addObject:@"control"];
+    if (flags & NSEventModifierFlagOption) [result addObject:@"option"];
+    if (flags & NSEventModifierFlagCommand) [result addObject:@"command"];
+    return result;
+}
+
 @interface MetacoWindow : NSWindow <NSWindowDelegate>
 @property (nonatomic, assign) BOOL shouldClose;
 @property (nonatomic, strong) NSMutableArray *pendingEvents;
@@ -274,11 +284,20 @@ static void native_error(NSError **error, NSString *message) {
     return NO;
 }
 
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    [self.pendingEvents addObject:@{@"type": @"focus"}];
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification {
+    [self.pendingEvents addObject:@{@"type": @"blur"}];
+}
+
 - (void)keyDown:(NSEvent *)event {
     NSDictionary *eventDict = @{
         @"type": @"key_press",
         @"key": @([event keyCode]),
-        @"char": [event characters] ?: @""
+        @"char": [event characters] ?: @"",
+        @"modifiers": event_modifiers(event)
     };
     [self.pendingEvents addObject:eventDict];
 }
@@ -286,7 +305,8 @@ static void native_error(NSError **error, NSString *message) {
 - (void)keyUp:(NSEvent *)event {
     NSDictionary *eventDict = @{
         @"type": @"key_release",
-        @"key": @([event keyCode])
+        @"key": @([event keyCode]),
+        @"modifiers": event_modifiers(event)
     };
     [self.pendingEvents addObject:eventDict];
 }
@@ -297,7 +317,8 @@ static void native_error(NSError **error, NSString *message) {
         @"type": @"mouse_press",
         @"x": @(loc.x),
         @"y": @(loc.y),
-        @"button": @([event buttonNumber])
+        @"button": @([event buttonNumber]),
+        @"modifiers": event_modifiers(event)
     };
     [self.pendingEvents addObject:eventDict];
 }
@@ -308,7 +329,8 @@ static void native_error(NSError **error, NSString *message) {
         @"type": @"mouse_release",
         @"x": @(loc.x),
         @"y": @(loc.y),
-        @"button": @([event buttonNumber])
+        @"button": @([event buttonNumber]),
+        @"modifiers": event_modifiers(event)
     };
     [self.pendingEvents addObject:eventDict];
 }
@@ -318,9 +340,21 @@ static void native_error(NSError **error, NSString *message) {
     NSDictionary *eventDict = @{
         @"type": @"mouse_move",
         @"x": @(loc.x),
-        @"y": @(loc.y)
+        @"y": @(loc.y),
+        @"modifiers": event_modifiers(event)
     };
     [self.pendingEvents addObject:eventDict];
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    // Cocoa reports wheel ticks for non-precise devices; expose both as pixels.
+    double scale = event.hasPreciseScrollingDeltas ? 1.0 : 10.0;
+    [self.pendingEvents addObject:@{
+        @"type": @"scroll",
+        @"dx": @(event.scrollingDeltaX * scale),
+        @"dy": @(event.scrollingDeltaY * scale),
+        @"modifiers": event_modifiers(event)
+    }];
 }
 
 - (void)rightMouseDown:(NSEvent *)event { [self mouseDown:event]; }
@@ -594,6 +628,15 @@ static VALUE events_to_ruby(VALUE ptr) {
         }
         if (dict[@"button"]) {
             rb_hash_aset(hash, ID2SYM(rb_intern("button")), INT2NUM([dict[@"button"] intValue]));
+        }
+        if (dict[@"dx"]) rb_hash_aset(hash, ID2SYM(rb_intern("dx")), DBL2NUM([dict[@"dx"] doubleValue]));
+        if (dict[@"dy"]) rb_hash_aset(hash, ID2SYM(rb_intern("dy")), DBL2NUM([dict[@"dy"] doubleValue]));
+        if (dict[@"modifiers"]) {
+            VALUE modifiers = rb_ary_new();
+            for (__unsafe_unretained NSString *modifier in dict[@"modifiers"]) {
+                rb_ary_push(modifiers, ID2SYM(rb_intern(modifier.UTF8String)));
+            }
+            rb_hash_aset(hash, ID2SYM(rb_intern("modifiers")), modifiers);
         }
         rb_ary_push(events, hash);
     }

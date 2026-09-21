@@ -202,10 +202,17 @@ static VALUE post_events(VALUE self, VALUE value) {
         MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
         const char text[] = "あ🎮a\0b";
         NSString *characters = [[NSString alloc] initWithBytes:text length:sizeof(text) - 1 encoding:NSUTF8StringEncoding];
-        NSEvent *key = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0
+        NSEvent *key = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+            modifierFlags:NSEventModifierFlagShift | NSEventModifierFlagCommand
             timestamp:0 windowNumber:window.windowNumber context:nil characters:characters
             charactersIgnoringModifiers:characters isARepeat:NO keyCode:0];
         [window keyDown:key];
+        CGEventRef scrollEvent = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2, -3, 2);
+        CGEventSetFlags(scrollEvent, kCGEventFlagMaskShift);
+        [window scrollWheel:[NSEvent eventWithCGEvent:scrollEvent]];
+        CFRelease(scrollEvent);
+        [window windowDidBecomeKey:[NSNotification notificationWithName:NSWindowDidBecomeKeyNotification object:window]];
+        [window windowDidResignKey:[NSNotification notificationWithName:NSWindowDidResignKeyNotification object:window]];
         NSEventType types[] = {NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp,
             NSEventTypeRightMouseDown, NSEventTypeRightMouseUp, NSEventTypeOtherMouseDown,
             NSEventTypeOtherMouseUp, NSEventTypeMouseMoved, NSEventTypeLeftMouseDragged,

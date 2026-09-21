@@ -149,6 +149,10 @@ Metaco.window_destroy(handle)
 - `:mouse_press` - Mouse button pressed (`:x`, `:y`, `:button`)
 - `:mouse_release` - Mouse button released (`:x`, `:y`, `:button`)
 - `:mouse_move` - Mouse moved (`:x`, `:y`)
+- `:scroll` - Scroll distance in pixels (`:dx`, `:dy`, `:modifiers`). Wheel ticks are scaled by 10; positive `:dy` follows Cocoa's upward convention.
+- `:focus` / `:blur` - Window key focus changed
+
+Key and mouse events include `:modifiers`, an array of `:shift`, `:control`, `:option`, and `:command`.
 
 ### API contracts
 

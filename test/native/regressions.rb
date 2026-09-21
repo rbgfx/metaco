@@ -200,6 +200,13 @@ class TestNativeRegressions < Test::Unit::TestCase
     key = events.find { |event| event[:type] == :key_press }
     assert_equal "あ🎮a\0b", key.fetch(:char)
     assert_equal Encoding::UTF_8, key.fetch(:char).encoding
+    assert_equal %i[shift command], key.fetch(:modifiers)
+    scroll = events.find { |event| event[:type] == :scroll }
+    assert_kind_of Numeric, scroll.fetch(:dx)
+    assert_kind_of Numeric, scroll.fetch(:dy)
+    assert_include scroll.fetch(:modifiers), :shift
+    assert_include events.map { |event| event[:type] }, :focus
+    assert_include events.map { |event| event[:type] }, :blur
     %i[mouse_press mouse_release].each do |type|
       assert_equal [0, 1, 2], events.select { |event| event[:type] == type }.map { |event| event[:button] }
     end
