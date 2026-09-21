@@ -29,8 +29,10 @@ static void native_error(NSError **error, NSString *message) {
 @property (nonatomic, strong) id<MTLBuffer> uniformBuffer;
 @property (nonatomic, strong) id<MTLTexture> outputTexture;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLTexture>> *computeTextures;
+@property (nonatomic, strong) id<MTLCommandBuffer> lastCommandBuffer;
 @property (nonatomic, readonly) BOOL hasComputeShader;
 - (BOOL)resizeToWidth:(int)width height:(int)height error:(NSError **)error;
+- (void)waitForLastCommand;
 - (void)releaseResources;
 @end
 
@@ -195,6 +197,7 @@ static void native_error(NSError **error, NSString *message) {
 }
 
 - (void)releaseResources {
+    [self waitForLastCommand];
     self.metalLayer.delegate = nil;
     [self.metalLayer removeFromSuperlayer];
     self.layer = nil;
@@ -207,6 +210,11 @@ static void native_error(NSError **error, NSString *message) {
     self.texture = nil;
     self.commandQueue = nil;
     self.device = nil;
+}
+
+- (void)waitForLastCommand {
+    [self.lastCommandBuffer waitUntilCompleted];
+    self.lastCommandBuffer = nil;
 }
 
 - (id<MTLCommandBuffer>)dispatchComputeWithUniforms:(const void *)data length:(NSUInteger)length
@@ -784,7 +792,9 @@ static VALUE cocoa_present_frame(VALUE value, BOOL compute) {
         } else if (window.useMetal) {
             id<MTLTexture> texture = compute ? window.metalView.outputTexture : window.metalView.texture;
             id<MTLCommandBuffer> command = [window.metalView presentTexture:texture error:&error];
+            window.metalView.lastCommandBuffer = command;
             finish_command(command, &state, &error);
+            if (!state) window.metalView.lastCommandBuffer = nil;
         } else {
             [window.imageView setNeedsDisplay:YES];
             [window displayIfNeeded];
@@ -957,7 +967,9 @@ static VALUE cocoa_dispatch_compute(VALUE self, VALUE value, VALUE uniform_data)
             id<MTLCommandBuffer> command = [window.metalView dispatchComputeWithUniforms:RSTRING_PTR(uniform_data)
                                                                                 length:RSTRING_LEN(uniform_data)
                                                                                  error:&error];
+            window.metalView.lastCommandBuffer = command;
             finish_command(command, &state, &error);
+            if (!state) window.metalView.lastCommandBuffer = nil;
         }
         if (error && !state) {
             message = rb_protect(string_to_ruby, (VALUE)(__bridge void *)error.localizedDescription, &state);
