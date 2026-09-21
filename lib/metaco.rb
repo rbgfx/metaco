@@ -10,7 +10,7 @@ else
       raise LoadError, "Metaco is only available on macOS"
     end
 
-    def self.window_create(_w, _h, _t)
+    def self.window_create(_w, _h, _t, resizable: false, high_dpi: false)
       raise LoadError, "Metaco is only available on macOS"
     end
 
@@ -51,6 +51,34 @@ else
     end
 
     def self.present_compute(_handle)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.texture_create(_handle, _width, _height, _bytes, filter: :linear, wrap: :clamp)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.texture_update(_texture, _bytes)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.texture_destroy(_texture)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.bind_compute_texture(_handle, _index, _texture)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.read_pixels(_handle, source: :compute)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.window_size(_handle)
+      raise LoadError, "Metaco is only available on macOS"
+    end
+
+    def self.framebuffer_size(_handle)
       raise LoadError, "Metaco is only available on macOS"
     end
   end
