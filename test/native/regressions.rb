@@ -44,6 +44,7 @@ class TestNativeRegressions < Test::Unit::TestCase
     Metaco.compile_compute_shader(handle, COLOR_SHADER)
   end
 
+  # AppKit may retain a closed NSWindow; native resources must still be gone.
   def assert_native_resources_released
     pump = window(1, 1, metal: false)
     100.times do
