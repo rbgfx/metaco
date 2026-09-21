@@ -5,6 +5,13 @@ require_relative "metaco/version"
 if RUBY_PLATFORM.include?("darwin")
   require "metaco/metaco"
   module Metaco
+    def self.texture_create(handle, width, height, bytes, filter: :linear, wrap: :clamp)
+      raise ArgumentError, "filter must be :linear" unless filter == :linear
+      raise ArgumentError, "wrap must be :clamp" unless wrap == :clamp
+
+      texture_create_native(handle, width, height, bytes)
+    end
+
     def self.read_pixels(handle, source: :compute)
       read_pixels_native(handle, source)
     end

@@ -27,6 +27,7 @@ static void native_error(NSError **error, NSString *message) {
 @property (nonatomic, strong) id<MTLComputePipelineState> computePipeline;
 @property (nonatomic, strong) id<MTLBuffer> uniformBuffer;
 @property (nonatomic, strong) id<MTLTexture> outputTexture;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLTexture>> *computeTextures;
 @property (nonatomic, readonly) BOOL hasComputeShader;
 @end
 
@@ -42,6 +43,7 @@ static void native_error(NSError **error, NSString *message) {
         self.texHeight = h;
         self.commandQueue = [device newCommandQueue];
         if (!self.commandQueue) return nil;
+        self.computeTextures = [NSMutableDictionary dictionary];
 
         // A render pass preserves RGBA channel meaning when writing a BGRA drawable.
         NSString *source = @"#include <metal_stdlib>\n"
@@ -168,6 +170,9 @@ static void native_error(NSError **error, NSString *message) {
     }
     [encoder setComputePipelineState:self.computePipeline];
     [encoder setTexture:self.outputTexture atIndex:0];
+    for (NSNumber *index in self.computeTextures) {
+        [encoder setTexture:self.computeTextures[index] atIndex:1 + index.unsignedIntegerValue];
+    }
     [encoder setBuffer:self.uniformBuffer offset:0 atIndex:0];
 
     NSUInteger limit = MIN(self.computePipeline.maxTotalThreadsPerThreadgroup,
@@ -338,7 +343,16 @@ typedef struct {
     BOOL busy;
 } MetacoHandle;
 
+typedef struct {
+    void *texture;
+    VALUE owner;
+    int width;
+    int height;
+    size_t byte_length;
+} MetacoTextureHandle;
+
 static VALUE cMetacoWindow;
+static VALUE cMetacoTexture;
 
 static void require_main_thread(void) {
     if (!pthread_main_np()) rb_raise(rb_eThreadError, "Metaco must be called on the main thread");
@@ -387,6 +401,34 @@ static MetacoHandle *get_handle(VALUE value, BOOL allow_closed) {
     if (!allow_closed && !handle->window) rb_raise(rb_eArgError, "Window is closed");
     if (handle->busy) rb_raise(rb_eRuntimeError, "Window is busy");
     return handle;
+}
+
+static void texture_mark(void *ptr) {
+    MetacoTextureHandle *texture = ptr;
+    if (texture) rb_gc_mark(texture->owner);
+}
+
+static void texture_free(void *ptr) {
+    MetacoTextureHandle *texture = ptr;
+    if (!texture) return;
+    if (texture->texture) CFRelease((CFTypeRef)texture->texture);
+    ruby_xfree(texture);
+}
+
+static size_t texture_size(const void *ptr) { return sizeof(MetacoTextureHandle); }
+
+static const rb_data_type_t texture_type = {
+    .wrap_struct_name = "Metaco::Texture",
+    .function = {.dmark = texture_mark, .dfree = texture_free, .dsize = texture_size},
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY
+};
+
+static MetacoTextureHandle *get_texture(VALUE value, BOOL allow_destroyed) {
+    require_main_thread();
+    MetacoTextureHandle *texture;
+    TypedData_Get_Struct(value, MetacoTextureHandle, &texture_type, texture);
+    if (!allow_destroyed && !texture->texture) rb_raise(rb_eArgError, "Texture is destroyed");
+    return texture;
 }
 
 static VALUE cocoa_init(VALUE self) {
@@ -685,6 +727,93 @@ static VALUE cocoa_window_size(VALUE self, VALUE value) {
     return dimensions;
 }
 
+static VALUE cocoa_texture_create_native(VALUE self, VALUE value, VALUE width, VALUE height, VALUE bytes) {
+    int w = NUM2INT(width);
+    int h = NUM2INT(height);
+    size_t length = pixel_byte_length(w, h);
+    Check_Type(bytes, T_STRING);
+    if ((size_t)RSTRING_LEN(bytes) != length) rb_raise(rb_eArgError, "Texture buffer size mismatch");
+    MetacoHandle *owner = get_handle(value, NO);
+    MetacoWindow *window = (__bridge MetacoWindow *)owner->window;
+    if (!window.useMetal) rb_raise(rb_eRuntimeError, "Metal is not available");
+    MetacoTextureHandle *texture;
+    VALUE result = TypedData_Make_Struct(cMetacoTexture, MetacoTextureHandle, &texture_type, texture);
+    texture->owner = value;
+    texture->width = w;
+    texture->height = h;
+    texture->byte_length = length;
+    @autoreleasepool {
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead;
+        desc.storageMode = MTLStorageModeManaged;
+        if (@available(macOS 10.15, *)) {
+            if (window.metalView.device.hasUnifiedMemory) desc.storageMode = MTLStorageModeShared;
+        }
+        id<MTLTexture> metalTexture = [window.metalView.device newTextureWithDescriptor:desc];
+        if (metalTexture) {
+            [metalTexture replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0
+                             withBytes:RSTRING_PTR(bytes) bytesPerRow:(size_t)w * 4];
+            texture->texture = (__bridge_retained void *)metalTexture;
+        }
+    }
+    RB_GC_GUARD(bytes);
+    RB_GC_GUARD(value);
+    if (!texture->texture) rb_raise(rb_eRuntimeError, "Failed to allocate Metal texture");
+    return result;
+}
+
+static VALUE cocoa_texture_update(VALUE self, VALUE value, VALUE bytes) {
+    MetacoTextureHandle *texture = get_texture(value, NO);
+    get_handle(texture->owner, NO);
+    Check_Type(bytes, T_STRING);
+    if ((size_t)RSTRING_LEN(bytes) != texture->byte_length) rb_raise(rb_eArgError, "Texture buffer size mismatch");
+    @autoreleasepool {
+        id<MTLTexture> metalTexture = (__bridge id<MTLTexture>)texture->texture;
+        [metalTexture replaceRegion:MTLRegionMake2D(0, 0, texture->width, texture->height)
+                         mipmapLevel:0 withBytes:RSTRING_PTR(bytes)
+                       bytesPerRow:(size_t)texture->width * 4];
+    }
+    RB_GC_GUARD(bytes);
+    RB_GC_GUARD(value);
+    return Qnil;
+}
+
+static VALUE cocoa_texture_destroy(VALUE self, VALUE value) {
+    MetacoTextureHandle *texture = get_texture(value, YES);
+    if (!texture->texture) return Qnil;
+    MetacoHandle *owner;
+    TypedData_Get_Struct(texture->owner, MetacoHandle, &handle_type, owner);
+    @autoreleasepool {
+        id<MTLTexture> metalTexture = (__bridge id<MTLTexture>)texture->texture;
+        if (owner->window) {
+            MetacoWindow *window = (__bridge MetacoWindow *)owner->window;
+            NSArray *keys = [window.metalView.computeTextures allKeysForObject:metalTexture];
+            [window.metalView.computeTextures removeObjectsForKeys:keys];
+        }
+        CFRelease((CFTypeRef)texture->texture);
+        texture->texture = NULL;
+    }
+    RB_GC_GUARD(value);
+    return Qnil;
+}
+
+static VALUE cocoa_bind_compute_texture(VALUE self, VALUE value, VALUE index, VALUE texture_value) {
+    MetacoHandle *handle = get_handle(value, NO);
+    int slot = NUM2INT(index);
+    if (slot < 0 || slot > 15) rb_raise(rb_eArgError, "Texture index must be between 0 and 15");
+    MetacoTextureHandle *texture = get_texture(texture_value, NO);
+    if (texture->owner != value) rb_raise(rb_eArgError, "Texture belongs to another window");
+    MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
+    if (!window.useMetal) rb_raise(rb_eRuntimeError, "Metal is not available");
+    @autoreleasepool {
+        window.metalView.computeTextures[@(slot)] = (__bridge id<MTLTexture>)texture->texture;
+    }
+    RB_GC_GUARD(value);
+    RB_GC_GUARD(texture_value);
+    return Qnil;
+}
+
 static VALUE cocoa_read_pixels_native(VALUE self, VALUE value, VALUE source) {
     if (!SYMBOL_P(source)) rb_raise(rb_eTypeError, "source must be a Symbol");
     ID source_id = SYM2ID(source);
@@ -754,6 +883,9 @@ void Init_metaco(void) {
     cMetacoWindow = rb_define_class_under(mMetaco, "Window", rb_cObject);
     rb_global_variable(&cMetacoWindow);
     rb_undef_alloc_func(cMetacoWindow);
+    cMetacoTexture = rb_define_class_under(mMetaco, "Texture", rb_cObject);
+    rb_global_variable(&cMetacoTexture);
+    rb_undef_alloc_func(cMetacoTexture);
 
     rb_define_module_function(mMetaco, "init", cocoa_init, 0);
     rb_define_module_function(mMetaco, "window_create", cocoa_window_create, 3);
@@ -772,4 +904,8 @@ void Init_metaco(void) {
     rb_define_module_function(mMetaco, "window_size", cocoa_window_size, 1);
     rb_define_module_function(mMetaco, "framebuffer_size", cocoa_window_size, 1);
     rb_define_module_function(mMetaco, "read_pixels_native", cocoa_read_pixels_native, 2);
+    rb_define_module_function(mMetaco, "texture_create_native", cocoa_texture_create_native, 4);
+    rb_define_module_function(mMetaco, "texture_update", cocoa_texture_update, 2);
+    rb_define_module_function(mMetaco, "texture_destroy", cocoa_texture_destroy, 1);
+    rb_define_module_function(mMetaco, "bind_compute_texture", cocoa_bind_compute_texture, 3);
 }

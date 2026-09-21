@@ -71,6 +71,17 @@ class TestMetaco < Test::Unit::TestCase
         assert_raise(ArgumentError) { Metaco.read_pixels(Object.new, source: :unknown) }
       end
     end
+
+    test "texture methods validate supported options" do
+      %i[texture_create texture_update texture_destroy bind_compute_texture].each do |method|
+        assert_respond_to Metaco, method
+      end
+      if RUBY_PLATFORM.include?("darwin")
+        assert_raise(ArgumentError) { Metaco.texture_create(Object.new, 1, 1, "\0" * 4, filter: :nearest) }
+        assert_raise(ArgumentError) { Metaco.texture_create(Object.new, 1, 1, "\0" * 4, wrap: :repeat) }
+        assert_raise(ArgumentError) { Metaco.texture_create(Object.new, 0, 1, "") }
+      end
+    end
   end
 
   sub_test_case "compute shader methods" do
@@ -390,6 +401,34 @@ class TestMetaco < Test::Unit::TestCase
     test "compile valid shader" do
       omit unless Metaco.metal_compute_available?(@handle)
       assert_true Metaco.compile_compute_shader(@handle, VALID_SHADER)
+    end
+
+    test "texture upload, update, and binding" do
+      omit unless Metaco.metal_compute_available?(@handle)
+      source = <<~MSL
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void compute_shader(texture2d<float, access::write> output [[texture(0)]],
+                                   texture2d<float> input [[texture(1)]],
+                                   uint2 gid [[thread_position_in_grid]]) {
+          output.write(input.read(uint2(0, 0)), gid);
+        }
+      MSL
+      red = [255, 0, 0, 255].pack("C4")
+      blue = [0, 0, 255, 255].pack("C4")
+      texture = Metaco.texture_create(@handle, 1, 1, red)
+      assert_kind_of Metaco::Texture, texture
+      assert_raise(ArgumentError) { Metaco.texture_update(texture, "") }
+      assert_nil Metaco.bind_compute_texture(@handle, 0, texture)
+      Metaco.compile_compute_shader(@handle, source)
+      Metaco.dispatch_compute(@handle, "")
+      assert_equal red, Metaco.read_pixels(@handle).byteslice(0, 4)
+      Metaco.texture_update(texture, blue)
+      Metaco.dispatch_compute(@handle, "")
+      assert_equal blue, Metaco.read_pixels(@handle).byteslice(0, 4)
+      assert_nil Metaco.texture_destroy(texture)
+      assert_nil Metaco.texture_destroy(texture)
+      assert_raise(ArgumentError) { Metaco.texture_update(texture, red) }
     end
 
     test "has_compute_shader? returns true after compile" do

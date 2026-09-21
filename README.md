@@ -138,6 +138,9 @@ Metaco.window_destroy(handle)
 | `dispatch_compute(handle, uniforms)` | Execute compute shader and wait for GPU completion |
 | `present_compute(handle)` | Present compute shader output and wait for GPU completion |
 | `has_compute_shader?(handle)` | Check if shader is compiled |
+| `texture_create(handle, width, height, bytes, filter: :linear, wrap: :clamp)` | Upload RGBA8 pixels as a Metal texture |
+| `texture_update(texture, bytes)` / `texture_destroy(texture)` | Replace pixels or release a texture |
+| `bind_compute_texture(handle, index, texture)` | Bind input texture at `texture(index + 1)` |
 
 ### Event Types
 
@@ -158,6 +161,7 @@ Metaco.window_destroy(handle)
 - Failed compilation preserves the previous shader and its resources. Dispatch and compute presentation require a compiled shader. GPU command failures raise `RuntimeError` after native resources have been cleaned up.
 - Dispatch covers exactly the window's pixels. Threadgroup dimensions may vary by pipeline and image width; shaders must not assume a fixed group size. The example's bounds check also makes it safe with other dispatch implementations.
 - `read_pixels` copies the selected texture into CPU-visible memory before returning. It requires an open window and a completed render. GPU readback has not been verified on a Metal device in headless CI.
+- Textures belong to the window that created them. Uploads require exactly `width * height * 4` RGBA8 bytes. Input textures use linear sampling and clamp addressing; other options raise `ArgumentError`. Destroyed textures cannot be updated or bound.
 - Presentation is synchronous so pixel uploads cannot overwrite an in-flight frame. An occluded window may have no drawable, in which case presentation is skipped. Rendering resource allocation failures select the bitmap fallback; compute availability then returns `false`.
 - On unsupported platforms both compute availability queries return `false`, and other APIs raise `LoadError`. On macOS, native extension loading errors retain their original diagnostics.
 
