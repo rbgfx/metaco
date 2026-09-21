@@ -196,6 +196,18 @@ static VALUE watch_window(VALUE self, VALUE value) {
 static VALUE watched_alive(VALUE self) { return watched_window != nil ? Qtrue : Qfalse; }
 static VALUE waiting(VALUE self) { return atomic_load(&gpu_waiting) ? Qtrue : Qfalse; }
 
+static VALUE resize_window(VALUE self, VALUE value, VALUE width, VALUE height) {
+    MetacoHandle *handle = get_handle(value, NO);
+    @autoreleasepool {
+        MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
+        NSRect content = NSMakeRect(0, 0, NUM2DBL(width), NUM2DBL(height));
+        [window setFrame:[window frameRectForContentRect:content] display:YES];
+        [window displayIfNeeded];
+    }
+    RB_GC_GUARD(value);
+    return Qnil;
+}
+
 static VALUE post_events(VALUE self, VALUE value) {
     MetacoHandle *handle = get_handle(value, NO);
     @autoreleasepool {
@@ -247,5 +259,6 @@ void Init_metaco_test(void) {
     rb_define_module_function(support, "watch_window", watch_window, 1);
     rb_define_module_function(support, "watched_alive?", watched_alive, 0);
     rb_define_module_function(support, "gpu_waiting?", waiting, 0);
+    rb_define_module_function(support, "resize_window", resize_window, 3);
     rb_define_module_function(support, "post_events", post_events, 1);
 }

@@ -213,6 +213,29 @@ class TestNativeRegressions < Test::Unit::TestCase
     assert_operator events.count { |event| event[:type] == :mouse_move }, :>=, 4
   end
 
+  test "resizing updates logical and framebuffer dimensions and pixel storage" do
+    MetacoTest.failure = "no_device"
+    handle = Metaco.window_create(20, 10, "Resizable", resizable: true, high_dpi: true)
+    @handles << handle
+    Metaco.poll_events(handle)
+    assert_equal [20, 10], Metaco.window_size(handle)
+    initial_framebuffer = Metaco.framebuffer_size(handle)
+    assert_operator initial_framebuffer[0], :>=, 20
+    assert_operator initial_framebuffer[1], :>=, 10
+
+    MetacoTest.resize_window(handle, 24, 12)
+    resize = Metaco.poll_events(handle).find { |event| event[:type] == :resize }
+    assert_not_nil resize
+    omit "WindowServer did not apply the requested content height" unless resize[:height] == 12
+    assert_equal [24, 12], [resize[:width], resize[:height]]
+    assert_equal Metaco.framebuffer_size(handle), [resize[:framebuffer_width], resize[:framebuffer_height]]
+
+    width, height = Metaco.framebuffer_size(handle)
+    pixels = "\0" * (width * height * 4)
+    assert_nil Metaco.set_pixels(handle, pixels, width, height)
+    assert_equal pixels, MetacoTest.read_pixels(handle, false, false)
+  end
+
   test "event conversion exceptions preserve events and unwind ARC ownership" do
     handle = window(64, 64, metal: false)
     MetacoTest.watch_window(handle)

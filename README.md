@@ -39,7 +39,7 @@ require "metaco"
 Metaco.init
 
 # Create a window
-handle = Metaco.window_create(800, 600, "My Window")
+handle = Metaco.window_create(800, 600, "My Window", resizable: true, high_dpi: true)
 
 # Main loop
 until Metaco.should_close?(handle)
@@ -115,11 +115,12 @@ Metaco.window_destroy(handle)
 | Method | Description |
 |--------|-------------|
 | `init` | Initialize Cocoa application |
-| `window_create(width, height, title)` | Create a new window, returns a `Metaco::Window` handle |
+| `window_create(width, height, title, resizable: false, high_dpi: false)` | Create a new window, returns a `Metaco::Window` handle |
 | `window_destroy(handle)` | Close and release the window; repeated calls are safe |
 | `should_close?(handle)` | Check if window should close |
 | `poll_events(handle)` | Poll and return pending events |
-| `window_size(handle)` / `framebuffer_size(handle)` | Return `[width, height]` |
+| `window_size(handle)` | Return the current logical `[width, height]` |
+| `framebuffer_size(handle)` | Return the current drawable pixel `[width, height]` |
 
 ### Rendering
 
@@ -151,6 +152,7 @@ Metaco.window_destroy(handle)
 - `:mouse_move` - Mouse moved (`:x`, `:y`)
 - `:scroll` - Scroll distance in pixels (`:dx`, `:dy`, `:modifiers`). Wheel ticks are scaled by 10; positive `:dy` follows Cocoa's upward convention.
 - `:focus` / `:blur` - Window key focus changed
+- `:resize` - Window size changed (`:width`, `:height`, `:framebuffer_width`, `:framebuffer_height`)
 
 Key and mouse events include `:modifiers`, an array of `:shift`, `:control`, `:option`, and `:command`.
 
@@ -159,7 +161,7 @@ Key and mouse events include `:modifiers`, an array of `:shift`, `:control`, `:o
 - Call `init` before creating windows. All native APIs must run on the process's main thread; worker-thread calls raise `ThreadError`. GPU completion waits release Ruby's GVL.
 - Handles are opaque `Metaco::Window` objects, replacing the integer pointers returned by 0.1.0. Pass them unchanged to Metaco methods. A closed handle raises `ArgumentError` on operations other than `window_destroy`; unrelated objects raise `TypeError`.
 - Release windows in an `ensure` block. GC also releases abandoned windows, scheduling AppKit cleanup on the main thread when necessary; `poll_events` services this queue.
-- Width and height must be between 1 and 16,384. `set_pixels` requires the original window dimensions and at least `width * height * 4` bytes of row-major RGBA data, with unpremultiplied alpha. Extra trailing bytes are ignored. Invalid dimensions or short buffers raise `ArgumentError`.
+- Width and height must be between 1 and 16,384. `resizable:` is false by default. `window_size` reports logical points; `framebuffer_size` reports drawable pixels, including the backing scale when `high_dpi: true`. `set_pixels` requires the current framebuffer dimensions and at least `width * height * 4` bytes of row-major RGBA data, with unpremultiplied alpha. Extra trailing bytes are ignored. Invalid dimensions or short buffers raise `ArgumentError`.
 - Titles and shader sources must contain valid UTF-8. Key event `:char` strings use UTF-8 and preserve embedded NUL characters. Mouse buttons are numbered 0 (left), 1 (right), and 2 (middle); dragging produces `:mouse_move` events.
 - Compute shaders use the entry point `compute_shader`, output texture 0, and a uniform buffer at index 0. Uniforms may contain 0–256 bytes; remaining bytes are zeroed on every dispatch. Larger inputs raise `ArgumentError`. Shader uniform structures must fit within 256 bytes.
 - Failed compilation preserves the previous shader and its resources. Dispatch and compute presentation require a compiled shader. GPU command failures raise `RuntimeError` after native resources have been cleaned up.

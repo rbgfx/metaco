@@ -8,6 +8,7 @@
 #import <ruby.h>
 #import <ruby/thread.h>
 #include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 
@@ -29,11 +30,27 @@ static void native_error(NSError **error, NSString *message) {
 @property (nonatomic, strong) id<MTLTexture> outputTexture;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLTexture>> *computeTextures;
 @property (nonatomic, readonly) BOOL hasComputeShader;
+- (BOOL)resizeToWidth:(int)width height:(int)height error:(NSError **)error;
 @end
 
 @implementation MetacoMetalView
 
 - (BOOL)hasComputeShader { return self.computePipeline != nil; }
+
+- (id<MTLTexture>)newTextureWithWidth:(int)width height:(int)height
+                                usage:(MTLTextureUsage)usage storageMode:(MTLStorageMode)storageMode {
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                     width:width height:height mipmapped:NO];
+    desc.usage = usage;
+    desc.storageMode = storageMode;
+    if (@available(macOS 10.15, *)) {
+        if (storageMode == MTLStorageModeManaged && self.device.hasUnifiedMemory) {
+            desc.storageMode = MTLStorageModeShared;
+        }
+    }
+    return [self.device newTextureWithDescriptor:desc];
+}
 
 - (instancetype)initWithFrame:(NSRect)frame device:(id<MTLDevice>)device width:(int)w height:(int)h {
     self = [super initWithFrame:frame];
@@ -135,12 +152,9 @@ static void native_error(NSError **error, NSString *message) {
     id<MTLComputePipelineState> pipeline = [self.device newComputePipelineStateWithFunction:function error:error];
     if (!pipeline) return NO;
 
-    MTLTextureDescriptor *desc = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                     width:self.texWidth height:self.texHeight mipmapped:NO];
-    desc.usage = MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead;
-    desc.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> output = [self.device newTextureWithDescriptor:desc];
+    id<MTLTexture> output = [self newTextureWithWidth:self.texWidth height:self.texHeight
+                                                usage:MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead
+                                          storageMode:MTLStorageModePrivate];
     id<MTLBuffer> uniforms = [self.device newBufferWithLength:256 options:MTLResourceStorageModeShared];
     if (!output || !uniforms || !uniforms.contents) {
         native_error(error, @"Failed to allocate compute resources");
@@ -151,6 +165,31 @@ static void native_error(NSError **error, NSString *message) {
     self.computePipeline = pipeline;
     self.outputTexture = output;
     self.uniformBuffer = uniforms;
+    return YES;
+}
+
+- (BOOL)resizeToWidth:(int)width height:(int)height error:(NSError **)error {
+    if (width == self.texWidth && height == self.texHeight) return YES;
+
+    id<MTLTexture> input = [self newTextureWithWidth:width height:height
+                                                usage:MTLTextureUsageShaderRead
+                                          storageMode:MTLStorageModeManaged];
+    id<MTLTexture> output = nil;
+    if (self.hasComputeShader) {
+        output = [self newTextureWithWidth:width height:height
+                                     usage:MTLTextureUsageShaderWrite | MTLTextureUsageShaderRead
+                               storageMode:MTLStorageModePrivate];
+    }
+    if (!input || (self.hasComputeShader && !output)) {
+        native_error(error, @"Failed to resize Metal textures");
+        return NO;
+    }
+
+    self.texture = input;
+    self.outputTexture = output;
+    self.texWidth = width;
+    self.texHeight = height;
+    self.metalLayer.drawableSize = CGSizeMake(width, height);
     return YES;
 }
 
@@ -208,6 +247,11 @@ static NSArray<NSString *> *event_modifiers(NSEvent *event) {
 @property (nonatomic, strong) NSMutableArray *pendingEvents;
 @property (nonatomic, strong) MetacoMetalView *metalView;
 @property (nonatomic, assign) BOOL useMetal;
+@property (nonatomic, assign) BOOL highDPI;
+@property (nonatomic, assign) int initialWidth;
+@property (nonatomic, assign) int initialHeight;
+@property (nonatomic, assign) BOOL initializing;
+@property (nonatomic, assign) BOOL hasResized;
 // Fallback for non-Metal
 @property (nonatomic, strong) NSBitmapImageRep *bitmapRep;
 @property (nonatomic, strong) NSImageView *imageView;
@@ -215,18 +259,24 @@ static NSArray<NSString *> *event_modifiers(NSEvent *event) {
 
 @implementation MetacoWindow
 
-- (instancetype)initWithWidth:(int)width height:(int)height title:(NSString *)title {
+- (instancetype)initWithWidth:(int)width height:(int)height title:(NSString *)title
+                     resizable:(BOOL)resizable highDPI:(BOOL)highDPI {
     NSRect frame = NSMakeRect(100, 100, width, height);
+    NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
+    if (resizable) style |= NSWindowStyleMaskResizable;
     self = [super initWithContentRect:frame
-                            styleMask:(NSWindowStyleMaskTitled |
-                                      NSWindowStyleMaskClosable |
-                                      NSWindowStyleMaskMiniaturizable)
+                            styleMask:style
                               backing:NSBackingStoreBuffered
                                 defer:NO];
     if (self) {
-        self.releasedWhenClosed = NO;
+        self.releasedWhenClosed = YES;
         self.shouldClose = NO;
         self.pendingEvents = [NSMutableArray array];
+        self.highDPI = highDPI;
+        self.initialWidth = width;
+        self.initialHeight = height;
+        self.initializing = YES;
+        self.hasResized = NO;
         [self setTitle:title];
         [self setDelegate:self];
 
@@ -241,6 +291,7 @@ static NSArray<NSString *> *event_modifiers(NSEvent *event) {
         self.useMetal = self.metalView != nil;
         if (self.useMetal) {
             [self setContentView:self.metalView];
+            self.metalView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         } else {
             // Device or rendering resource creation failed: use the bitmap path.
             self.bitmapRep = [[NSBitmapImageRep alloc]
@@ -270,10 +321,13 @@ static NSArray<NSString *> *event_modifiers(NSEvent *event) {
             }
             [self.imageView setImage:image];
             [self.imageView setImageScaling:NSImageScaleAxesIndependently];
+            self.imageView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
             [self setContentView:self.imageView];
         }
 
+        [self setContentSize:NSMakeSize(width, height)];
         [self setAcceptsMouseMovedEvents:YES];
+        self.initializing = NO;
         [self makeKeyAndOrderFront:nil];
     }
     return self;
@@ -290,6 +344,30 @@ static NSArray<NSString *> *event_modifiers(NSEvent *event) {
 
 - (void)windowDidResignKey:(NSNotification *)notification {
     [self.pendingEvents addObject:@{@"type": @"blur"}];
+}
+
+- (void)windowDidResize:(NSNotification *)notification {
+    if (self.initializing) return;
+    NSRect content = [self contentRectForFrameRect:self.frame];
+    if (!self.hasResized && content.size.width <= 1.0 && content.size.height <= 1.0 &&
+        (self.initialWidth > 1 || self.initialHeight > 1)) return;
+    self.hasResized = YES;
+    NSRect backing = [self convertRectToBacking:content];
+    int width = MAX(1, (int)llround(content.size.width));
+    int height = MAX(1, (int)llround(content.size.height));
+    int framebufferWidth = self.highDPI ? MAX(1, (int)llround(backing.size.width)) : width;
+    int framebufferHeight = self.highDPI ? MAX(1, (int)llround(backing.size.height)) : height;
+    [self.pendingEvents addObject:@{
+        @"type": @"resize",
+        @"width": @(width),
+        @"height": @(height),
+        @"framebuffer_width": @(framebufferWidth),
+        @"framebuffer_height": @(framebufferHeight)
+    }];
+}
+
+- (void)windowDidChangeBackingProperties:(NSNotification *)notification {
+    [self windowDidResize:notification];
 }
 
 - (void)keyDown:(NSEvent *)event {
@@ -373,6 +451,8 @@ typedef struct {
     void *window;
     int width;
     int height;
+    int logical_width;
+    int logical_height;
     size_t byte_length;
     BOOL busy;
 } MetacoHandle;
@@ -403,10 +483,78 @@ static size_t pixel_byte_length(int width, int height) {
     return (size_t)width * (size_t)height * 4;
 }
 
+static void window_dimensions(MetacoWindow *window, int *logical_width, int *logical_height,
+                              int *framebuffer_width, int *framebuffer_height) {
+    NSRect content = [window contentRectForFrameRect:window.frame];
+    NSRect backing = [window convertRectToBacking:content];
+    *logical_width = MAX(1, (int)llround(content.size.width));
+    *logical_height = MAX(1, (int)llround(content.size.height));
+    if (!window.hasResized) {
+        *logical_width = window.initialWidth;
+        *logical_height = window.initialHeight;
+    }
+    if (window.highDPI) {
+        *framebuffer_width = MAX(*logical_width, (int)llround(backing.size.width));
+        *framebuffer_height = MAX(*logical_height, (int)llround(backing.size.height));
+    } else {
+        *framebuffer_width = *logical_width;
+        *framebuffer_height = *logical_height;
+    }
+}
+
+static BOOL resize_bitmap(MetacoWindow *window, int width, int height, NSError **error) {
+    NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL
+                      pixelsWide:width
+                      pixelsHigh:height
+                   bitsPerSample:8
+                 samplesPerPixel:4
+                        hasAlpha:YES
+                        isPlanar:NO
+                  colorSpaceName:NSDeviceRGBColorSpace
+                    bitmapFormat:NSBitmapFormatAlphaNonpremultiplied
+                 bytesPerRow:(size_t)width * 4
+                bitsPerPixel:32];
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(width, height)];
+    if (!bitmap || !bitmap.bitmapData || !image) {
+        native_error(error, @"Failed to resize bitmap resources");
+        return NO;
+    }
+    [image addRepresentation:bitmap];
+    window.bitmapRep = bitmap;
+    [window.imageView setFrame:window.contentView.bounds];
+    [window.imageView setImage:image];
+    return YES;
+}
+
+static BOOL sync_handle_dimensions(MetacoHandle *handle, NSError **error) {
+    MetacoWindow *window = (__bridge MetacoWindow *)handle->window;
+    int logical_width, logical_height, framebuffer_width, framebuffer_height;
+    window_dimensions(window, &logical_width, &logical_height, &framebuffer_width, &framebuffer_height);
+    if (framebuffer_width != handle->width || framebuffer_height != handle->height) {
+        BOOL resized = window.useMetal
+            ? [window.metalView resizeToWidth:framebuffer_width height:framebuffer_height error:error]
+            : resize_bitmap(window, framebuffer_width, framebuffer_height, error);
+        if (!resized) return NO;
+        handle->width = framebuffer_width;
+        handle->height = framebuffer_height;
+        handle->byte_length = pixel_byte_length(framebuffer_width, framebuffer_height);
+    }
+    handle->logical_width = logical_width;
+    handle->logical_height = logical_height;
+    return YES;
+}
+
 static void release_window(void *ptr) {
     @autoreleasepool {
         MetacoWindow *window = (__bridge_transfer MetacoWindow *)ptr;
         window.delegate = nil;
+        [window orderOut:nil];
+        [window setContentView:nil];
+        window.metalView = nil;
+        window.imageView = nil;
+        window.bitmapRep = nil;
+        window.pendingEvents = nil;
         [window close];
     }
 }
@@ -475,7 +623,8 @@ static VALUE cocoa_init(VALUE self) {
     return Qnil;
 }
 
-static VALUE cocoa_window_create(VALUE self, VALUE width, VALUE height, VALUE title) {
+static VALUE cocoa_window_create_native(VALUE self, VALUE width, VALUE height, VALUE title,
+                                        VALUE resizable, VALUE high_dpi) {
     require_main_thread();
     int w = NUM2INT(width);
     int h = NUM2INT(height);
@@ -485,8 +634,11 @@ static VALUE cocoa_window_create(VALUE self, VALUE width, VALUE height, VALUE ti
 
     MetacoHandle *handle;
     VALUE result = TypedData_Make_Struct(cMetacoWindow, MetacoHandle, &handle_type, handle);
+    handle->window = NULL;
     handle->width = w;
     handle->height = h;
+    handle->logical_width = w;
+    handle->logical_height = h;
     handle->byte_length = length;
     BOOL valid_title;
     @autoreleasepool {
@@ -495,14 +647,38 @@ static VALUE cocoa_window_create(VALUE self, VALUE width, VALUE height, VALUE ti
                                               encoding:NSUTF8StringEncoding];
         valid_title = text != nil;
         if (valid_title) {
-            MetacoWindow *window = [[MetacoWindow alloc] initWithWidth:w height:h title:text];
+            MetacoWindow *window = [[MetacoWindow alloc] initWithWidth:w height:h title:text
+                                                              resizable:RTEST(resizable)
+                                                               highDPI:RTEST(high_dpi)];
             handle->window = (__bridge_retained void *)window;
         }
     }
     RB_GC_GUARD(title);
     if (!valid_title) rb_raise(rb_eArgError, "Title must contain valid UTF-8");
     if (!handle->window) rb_raise(rb_eRuntimeError, "Failed to create window resources");
+    NSError *error = nil;
+    if (!sync_handle_dimensions(handle, &error)) {
+        void *ptr = handle->window;
+        handle->window = NULL;
+        if (ptr) release_window(ptr);
+        rb_raise(rb_eRuntimeError, "%s", error.localizedDescription.UTF8String);
+    }
     return result;
+}
+
+static VALUE cocoa_window_create(int argc, VALUE *argv, VALUE self) {
+    VALUE width, height, title, keywords;
+    rb_scan_args(argc, argv, "3:", &width, &height, &title, &keywords);
+    VALUE resizable = Qfalse;
+    VALUE high_dpi = Qfalse;
+    if (!NIL_P(keywords)) {
+        ID names[] = {rb_intern("resizable"), rb_intern("high_dpi")};
+        VALUE values[] = {Qfalse, Qfalse};
+        rb_get_kwargs(keywords, names, 0, 2, values);
+        resizable = values[0] == Qundef ? Qfalse : values[0];
+        high_dpi = values[1] == Qundef ? Qfalse : values[1];
+    }
+    return cocoa_window_create_native(self, width, height, title, resizable, high_dpi);
 }
 
 static VALUE cocoa_window_destroy(VALUE self, VALUE value) {
@@ -521,6 +697,10 @@ static VALUE cocoa_set_pixels(VALUE self, VALUE value, VALUE buffer, VALUE width
     size_t length = pixel_byte_length(w, h);
     Check_Type(buffer, T_STRING);
     MetacoHandle *handle = get_handle(value, NO);
+    NSError *resize_error = nil;
+    if (!sync_handle_dimensions(handle, &resize_error)) {
+        rb_raise(rb_eRuntimeError, "%s", resize_error.localizedDescription.UTF8String);
+    }
     if (w != handle->width || h != handle->height) {
         rb_raise(rb_eArgError, "Pixel dimensions must match the window");
     }
@@ -572,6 +752,10 @@ static VALUE string_to_ruby(VALUE ptr) {
 
 static VALUE cocoa_present_frame(VALUE value, BOOL compute) {
     MetacoHandle *handle = get_handle(value, NO);
+    NSError *resize_error = nil;
+    if (!sync_handle_dimensions(handle, &resize_error)) {
+        rb_raise(rb_eRuntimeError, "%s", resize_error.localizedDescription.UTF8String);
+    }
     VALUE message = Qnil;
     int state = 0;
     handle->busy = YES;
@@ -631,6 +815,16 @@ static VALUE events_to_ruby(VALUE ptr) {
         }
         if (dict[@"dx"]) rb_hash_aset(hash, ID2SYM(rb_intern("dx")), DBL2NUM([dict[@"dx"] doubleValue]));
         if (dict[@"dy"]) rb_hash_aset(hash, ID2SYM(rb_intern("dy")), DBL2NUM([dict[@"dy"] doubleValue]));
+        if (dict[@"width"]) rb_hash_aset(hash, ID2SYM(rb_intern("width")), INT2NUM([dict[@"width"] intValue]));
+        if (dict[@"height"]) rb_hash_aset(hash, ID2SYM(rb_intern("height")), INT2NUM([dict[@"height"] intValue]));
+        if (dict[@"framebuffer_width"]) {
+            rb_hash_aset(hash, ID2SYM(rb_intern("framebuffer_width")),
+                         INT2NUM([dict[@"framebuffer_width"] intValue]));
+        }
+        if (dict[@"framebuffer_height"]) {
+            rb_hash_aset(hash, ID2SYM(rb_intern("framebuffer_height")),
+                         INT2NUM([dict[@"framebuffer_height"] intValue]));
+        }
         if (dict[@"modifiers"]) {
             VALUE modifiers = rb_ary_new();
             for (__unsafe_unretained NSString *modifier in dict[@"modifiers"]) {
@@ -694,6 +888,10 @@ static VALUE cocoa_metal_compute_available(VALUE self, VALUE value) {
 static VALUE cocoa_compile_compute_shader(VALUE self, VALUE value, VALUE msl_source) {
     Check_Type(msl_source, T_STRING);
     MetacoHandle *handle = get_handle(value, NO);
+    NSError *resize_error = nil;
+    if (!sync_handle_dimensions(handle, &resize_error)) {
+        rb_raise(rb_eRuntimeError, "%s", resize_error.localizedDescription.UTF8String);
+    }
     VALUE message = Qnil;
     int state = 0;
     handle->busy = YES;
@@ -726,6 +924,10 @@ static VALUE cocoa_dispatch_compute(VALUE self, VALUE value, VALUE uniform_data)
     Check_Type(uniform_data, T_STRING);
     if (RSTRING_LEN(uniform_data) > 256) rb_raise(rb_eArgError, "Uniform data must be at most 256 bytes");
     MetacoHandle *handle = get_handle(value, NO);
+    NSError *resize_error = nil;
+    if (!sync_handle_dimensions(handle, &resize_error)) {
+        rb_raise(rb_eRuntimeError, "%s", resize_error.localizedDescription.UTF8String);
+    }
     VALUE message = Qnil;
     int state = 0;
     handle->busy = YES;
@@ -765,6 +967,21 @@ static VALUE cocoa_has_compute_shader(VALUE self, VALUE value) {
 
 static VALUE cocoa_window_size(VALUE self, VALUE value) {
     MetacoHandle *handle = get_handle(value, NO);
+    NSError *resize_error = nil;
+    if (!sync_handle_dimensions(handle, &resize_error)) {
+        rb_raise(rb_eRuntimeError, "%s", resize_error.localizedDescription.UTF8String);
+    }
+    VALUE dimensions = rb_ary_new_from_args(2, INT2NUM(handle->logical_width), INT2NUM(handle->logical_height));
+    RB_GC_GUARD(value);
+    return dimensions;
+}
+
+static VALUE cocoa_framebuffer_size(VALUE self, VALUE value) {
+    MetacoHandle *handle = get_handle(value, NO);
+    NSError *resize_error = nil;
+    if (!sync_handle_dimensions(handle, &resize_error)) {
+        rb_raise(rb_eRuntimeError, "%s", resize_error.localizedDescription.UTF8String);
+    }
     VALUE dimensions = rb_ary_new_from_args(2, INT2NUM(handle->width), INT2NUM(handle->height));
     RB_GC_GUARD(value);
     return dimensions;
@@ -865,6 +1082,10 @@ static VALUE cocoa_read_pixels_native(VALUE self, VALUE value, VALUE source) {
         rb_raise(rb_eArgError, "source must be :compute or :set_pixels");
     }
     MetacoHandle *handle = get_handle(value, NO);
+    NSError *resize_error = nil;
+    if (!sync_handle_dimensions(handle, &resize_error)) {
+        rb_raise(rb_eRuntimeError, "%s", resize_error.localizedDescription.UTF8String);
+    }
     VALUE output = rb_str_new(NULL, handle->byte_length);
     VALUE message = Qnil;
     int state = 0;
@@ -931,7 +1152,7 @@ void Init_metaco(void) {
     rb_undef_alloc_func(cMetacoTexture);
 
     rb_define_module_function(mMetaco, "init", cocoa_init, 0);
-    rb_define_module_function(mMetaco, "window_create", cocoa_window_create, 3);
+    rb_define_module_function(mMetaco, "window_create", cocoa_window_create, -1);
     rb_define_module_function(mMetaco, "window_destroy", cocoa_window_destroy, 1);
     rb_define_module_function(mMetaco, "set_pixels", cocoa_set_pixels, 4);
     rb_define_module_function(mMetaco, "present", cocoa_present, 1);
@@ -945,7 +1166,7 @@ void Init_metaco(void) {
     rb_define_module_function(mMetaco, "present_compute", cocoa_present_compute, 1);
     rb_define_module_function(mMetaco, "has_compute_shader?", cocoa_has_compute_shader, 1);
     rb_define_module_function(mMetaco, "window_size", cocoa_window_size, 1);
-    rb_define_module_function(mMetaco, "framebuffer_size", cocoa_window_size, 1);
+    rb_define_module_function(mMetaco, "framebuffer_size", cocoa_framebuffer_size, 1);
     rb_define_module_function(mMetaco, "read_pixels_native", cocoa_read_pixels_native, 2);
     rb_define_module_function(mMetaco, "texture_create_native", cocoa_texture_create_native, 4);
     rb_define_module_function(mMetaco, "texture_update", cocoa_texture_update, 2);
