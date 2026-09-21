@@ -44,14 +44,14 @@ class TestNativeRegressions < Test::Unit::TestCase
     Metaco.compile_compute_shader(handle, COLOR_SHADER)
   end
 
-  def assert_window_released
+  def assert_native_resources_released
     pump = window(1, 1, metal: false)
     100.times do
       Metaco.poll_events(pump)
-      break unless MetacoTest.watched_alive?
+      break if MetacoTest.watched_resources_released?
       sleep 0.01
     end
-    assert_false MetacoTest.watched_alive?
+    assert_true MetacoTest.watched_resources_released?
   end
 
   test "normal and compute render passes preserve RGBA colors and orientation" do
@@ -187,7 +187,7 @@ class TestNativeRegressions < Test::Unit::TestCase
     MetacoTest.inject_failure(handle, "none")
     assert_nil Metaco.dispatch_compute(handle, "")
     Metaco.window_destroy(handle)
-    assert_window_released
+    assert_native_resources_released
   ensure
     worker&.join
   end
@@ -245,7 +245,7 @@ class TestNativeRegressions < Test::Unit::TestCase
     MetacoTest.failure = "none"
     assert_equal "あ🎮a\0b", Metaco.poll_events(handle).find { |event| event[:type] == :key_press }.fetch(:char)
     Metaco.window_destroy(handle)
-    assert_window_released
+    assert_native_resources_released
   end
 
   def abandon_window
@@ -258,6 +258,6 @@ class TestNativeRegressions < Test::Unit::TestCase
     abandon_window
     Thread.new { 3.times { GC.start } }.join
     # The main queue performs AppKit cleanup for collections on other threads.
-    assert_window_released
+    assert_native_resources_released
   end
 end

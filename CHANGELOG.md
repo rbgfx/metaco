@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Add resizable windows, logical and framebuffer size reporting, Retina-aware dimensions, resize events, and resize-safe pixel/compute resources.
-- Release closed windows promptly when explicitly destroyed or collected.
+- Release native resources promptly when windows are explicitly destroyed or collected.
+- Clarify that GC cleanup guarantees native resource release while AppKit may retain a closed window object temporarily.
 
 ## 0.2.0 - 2026-09-09
 
