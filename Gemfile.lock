@@ -6,11 +6,11 @@ PATH
 GEM
   remote: https://rubygems.org/
   specs:
-    power_assert (3.0.1)
+    power_assert (3.1.0)
     rake (13.3.1)
     rake-compiler (1.3.1)
       rake
-    test-unit (3.7.5)
+    test-unit (3.7.8)
       power_assert
 
 PLATFORMS
@@ -21,15 +21,15 @@ DEPENDENCIES
   metaco!
   rake (~> 13.0)
   rake-compiler (~> 1.2)
-  test-unit (~> 3.6)
+  test-unit (~> 3.7)
 
 CHECKSUMS
   bundler (4.0.19) sha256=b48056e4c77fb3853cc47775b5447ede44aaa4f53c32f168014ab4fe86587d47
   metaco (0.2.0)
-  power_assert (3.0.1) sha256=8ce9876716cc74e863fcd4cdcdc52d792bd983598d1af3447083a3a9a4d34103
+  power_assert (3.1.0) sha256=fefe98ed5d3140628138f3f9f9194d6ece01f1320e69700d3c928adca7518251
   rake (13.3.1) sha256=8c9e89d09f66a26a01264e7e3480ec0607f0c497a861ef16063604b1b08eb19c
   rake-compiler (1.3.1) sha256=6b351612b6e2d73ddd5563ee799bb58685176e05363db6758504bd11573d670a
-  test-unit (3.7.5)
+  test-unit (3.7.8) sha256=689d1ca53f4d46f678b4e5d68d8e4294f87fc5e8b9238cc4de7c5727e8d65943
 
 BUNDLED WITH
   4.0.19
