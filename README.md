@@ -1,11 +1,25 @@
 # metaco
 
-A Ruby C extension providing native macOS window management and Metal GPU acceleration for graphics applications.
+> Native macOS windows and Metal GPU compute from Ruby.
+
+[![Gem version](https://badge.fury.io/rb/metaco.svg)](https://rubygems.org/gems/metaco) [![Downloads](https://img.shields.io/gem/dt/metaco?label=downloads)](https://rubygems.org/gems/metaco) [![Ruby](https://img.shields.io/badge/ruby-%3E%3D3.0-CC342D?logo=ruby&logoColor=white)](https://www.ruby-lang.org/) [![CI](https://github.com/rbgfx/metaco/actions/workflows/main.yml/badge.svg)](https://github.com/rbgfx/metaco/actions/workflows/main.yml) [![License](https://img.shields.io/badge/license-MIT-750014.svg)](LICENSE)
+
+**[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [API Reference](#api-reference) · [Development](#development) · [License](#license) · [Website](https://rbgfx.github.io/metaco/)**
+
+---
+
+Metaco is a Ruby C extension for Cocoa window management, pixel presentation, input events, and Metal GPU compute.
+
+## Features
+
+- Native Cocoa window lifecycle and RGBA pixel presentation.
+- Keyboard, mouse, scroll, focus, and resize event polling.
+- Metal compute shaders, texture upload, and pixel readback.
 
 ## Requirements
 
 - macOS
-- Ruby 3.1+
+- Ruby 3.0 or newer
 - Xcode Command Line Tools
 
 ## Installation
