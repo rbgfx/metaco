@@ -1,4 +1,4 @@
-name: CI
+name: Ruby
 on:
   push:
     branches:
@@ -10,6 +10,13 @@ on:
         description: Run mandatory GPU checks on a macOS runner labeled metal
         type: boolean
         default: false
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: macos-latest
@@ -23,9 +30,11 @@ jobs:
           - "3.4"
           - "ruby"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@984c0c890880bbf811283d6f09c4607c62d210a4 # v1.323.0
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler: "2.6.9"
@@ -40,8 +49,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.run_metal
     runs-on: [self-hosted, macOS, metal]
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@984c0c890880bbf811283d6f09c4607c62d210a4 # v1.323.0
         with:
           ruby-version: "3.4"
           bundler: "2.6.9"
@@ -52,3 +63,18 @@ jobs:
           METACO_REQUIRE_METAL: "1"
           MTL_DEBUG_LAYER: "1"
           MTL_SHADER_VALIDATION: "1"
+
+  package:
+    name: Strict gem build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@984c0c890880bbf811283d6f09c4607c62d210a4 # v1.323.0
+        with:
+          ruby-version: '4.0'
+          bundler: default
+      - name: Build with strict gem validation
+        run: gem build --strict "$(find . -maxdepth 1 -name '*.gemspec' -print -quit)"
