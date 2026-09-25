@@ -14,6 +14,7 @@ mkmf.log
 # Bundler
 /.bundle/
 /vendor/bundle
+Gemfile.lock
 
 # rake-compiler
 /tmp/
